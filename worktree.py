@@ -453,6 +453,62 @@ class WorktreeManager:
 
 
 def main():
+    # Check if first argument is a repository alias before argparse
+    config = RepoConfig()
+
+    if len(sys.argv) > 1 and sys.argv[1] != "repo" and sys.argv[1] in config.repos:
+        # This is a repository alias command
+        repo_alias = sys.argv[1]
+        repo_path = config.get_repo_path(repo_alias)
+
+        if not repo_path.exists():
+            print(f"{Colors.RED}Error: Repository path no longer exists: {repo_path}{Colors.END}")
+            sys.exit(1)
+
+        # Parse the worktree command
+        wt_parser = argparse.ArgumentParser(
+            prog=f"worktree {repo_alias}",
+            description=f"Manage worktrees for '{repo_alias}' repository"
+        )
+        wt_subparsers = wt_parser.add_subparsers(dest="wt_command")
+
+        # New command
+        new_parser = wt_subparsers.add_parser("new", help="Create a new worktree")
+        new_parser.add_argument("name", help="Name for the new worktree")
+        new_parser.add_argument("--base", default="origin/main", help="Base branch (default: origin/main)")
+        new_parser.add_argument("--skip-setup", action="store_true", help="Skip setup steps")
+
+        # Remove command
+        rm_parser = wt_subparsers.add_parser("rm", help="Remove a worktree")
+        rm_parser.add_argument("name", help="Name of the worktree to remove")
+        rm_parser.add_argument("--force", "-f", action="store_true", help="Force removal without confirmation")
+
+        # Select command
+        select_parser = wt_subparsers.add_parser("select", help="Switch to a worktree")
+        select_parser.add_argument("name", help="Name of the worktree to switch to")
+
+        # List command
+        wt_subparsers.add_parser("list", help="List all worktrees")
+
+        wt_args = wt_parser.parse_args(sys.argv[2:])
+
+        if not wt_args.wt_command:
+            wt_parser.print_help()
+            sys.exit(1)
+
+        manager = WorktreeManager(repo_path)
+
+        if wt_args.wt_command == "new":
+            manager.create_worktree(wt_args.name, wt_args.base, wt_args.skip_setup)
+        elif wt_args.wt_command == "rm":
+            manager.remove_worktree(wt_args.name, wt_args.force)
+        elif wt_args.wt_command == "select":
+            manager.select_worktree(wt_args.name)
+        elif wt_args.wt_command == "list":
+            manager.list_worktrees()
+        return
+
+    # Regular argparse for repo management
     parser = argparse.ArgumentParser(
         description="Git Worktree Manager - Manage worktrees across multiple repositories from anywhere",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -487,11 +543,10 @@ Examples:
 
     repo_list = repo_subparsers.add_parser("list", help="List all repository aliases")
 
-    args, remaining = parser.parse_known_args()
+    args = parser.parse_args()
 
     # Handle repo management commands
     if args.command == "repo":
-        config = RepoConfig()
         if args.repo_command == "add":
             config.add_repo(args.alias, args.path)
         elif args.repo_command == "rm":
@@ -500,69 +555,6 @@ Examples:
             config.list_repos()
         else:
             repo_parser.print_help()
-        return
-
-    # If first arg is not 'repo', treat it as a repository alias
-    if args.command and args.command != "repo":
-        repo_alias = args.command
-        config = RepoConfig()
-        repo_path = config.get_repo_path(repo_alias)
-
-        if not repo_path:
-            print(f"{Colors.RED}Error: Unknown repository alias '{repo_alias}'{Colors.END}")
-            print(f"\nConfigured repositories:")
-            config.list_repos()
-            print(f"\nAdd a repository with:")
-            print(f"  worktree repo add {repo_alias} <path>")
-            sys.exit(1)
-
-        if not repo_path.exists():
-            print(f"{Colors.RED}Error: Repository path no longer exists: {repo_path}{Colors.END}")
-            sys.exit(1)
-
-        # Parse the actual worktree command
-        wt_parser = argparse.ArgumentParser()
-        wt_subparsers = wt_parser.add_subparsers(dest="wt_command")
-
-        # New command
-        new_parser = wt_subparsers.add_parser("new")
-        new_parser.add_argument("name")
-        new_parser.add_argument("--base", default="origin/main")
-        new_parser.add_argument("--skip-setup", action="store_true")
-
-        # Remove command
-        rm_parser = wt_subparsers.add_parser("rm")
-        rm_parser.add_argument("name")
-        rm_parser.add_argument("--force", "-f", action="store_true")
-
-        # Select command
-        select_parser = wt_subparsers.add_parser("select")
-        select_parser.add_argument("name")
-
-        # List command
-        wt_subparsers.add_parser("list")
-
-        wt_args = wt_parser.parse_args(remaining)
-
-        if not wt_args.wt_command:
-            print(f"{Colors.YELLOW}Usage: worktree {repo_alias} <command>{Colors.END}")
-            print(f"\nAvailable commands:")
-            print(f"  new <name>      Create a new worktree")
-            print(f"  list            List all worktrees")
-            print(f"  select <name>   Switch to a worktree")
-            print(f"  rm <name>       Remove a worktree")
-            sys.exit(1)
-
-        manager = WorktreeManager(repo_path)
-
-        if wt_args.wt_command == "new":
-            manager.create_worktree(wt_args.name, wt_args.base, wt_args.skip_setup)
-        elif wt_args.wt_command == "rm":
-            manager.remove_worktree(wt_args.name, wt_args.force)
-        elif wt_args.wt_command == "select":
-            manager.select_worktree(wt_args.name)
-        elif wt_args.wt_command == "list":
-            manager.list_worktrees()
     else:
         parser.print_help()
 
