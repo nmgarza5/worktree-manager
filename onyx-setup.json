@@ -1,0 +1,79 @@
+{
+  "docker_compose": {
+    "compose_dir": "deployment/docker_compose",
+    "services": {
+      "nginx": {
+        "internal": 80,
+        "description": "Web interface"
+      },
+      "api_server": {
+        "internal": 8080,
+        "description": "Backend API"
+      },
+      "relational_db": {
+        "internal": 5432,
+        "description": "PostgreSQL database",
+        "volumes": ["db_volume"]
+      },
+      "index": {
+        "internal": 19071,
+        "description": "Vespa search engine",
+        "volumes": ["vespa_volume"]
+      },
+      "cache": {
+        "internal": 6379,
+        "description": "Redis cache"
+      },
+      "minio": {
+        "internal": 9000,
+        "description": "S3-compatible storage",
+        "volumes": ["minio_data"]
+      }
+    }
+  },
+  "setup_steps": [
+    {
+      "name": "Python virtual environment",
+      "type": "python_venv"
+    },
+    {
+      "name": "Backend dependencies",
+      "type": "pip_install",
+      "requirements": [
+        "backend/requirements/default.txt",
+        "backend/requirements/dev.txt"
+      ]
+    },
+    {
+      "name": "Onyx package (editable)",
+      "type": "pip_install_editable",
+      "path": "backend"
+    },
+    {
+      "name": "Model server dependencies",
+      "type": "pip_install",
+      "requirements": [
+        "backend/requirements/model_server.txt"
+      ]
+    },
+    {
+      "name": "Pre-commit",
+      "type": "pip_install_package",
+      "package": "pre-commit"
+    },
+    {
+      "name": "Pre-commit hooks",
+      "type": "precommit_install",
+      "path": "backend"
+    },
+    {
+      "name": "Playwright browsers",
+      "type": "playwright_install"
+    },
+    {
+      "name": "Frontend dependencies",
+      "type": "npm_install",
+      "path": "web"
+    }
+  ]
+}

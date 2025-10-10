@@ -2,6 +2,8 @@
 
 A simple CLI tool for managing git worktrees across multiple repositories **from anywhere**.
 
+Built for the [Onyx](https://github.com/danswer-ai/danswer) open-source project, but works with any Git repository.
+
 ## Why Use This?
 
 Work on multiple branches simultaneously without:
@@ -257,7 +259,11 @@ Configure automated environment setup to run when creating new worktrees.
 Create `.worktree-setup.json` in your repository root:
 
 ```bash
-# For Onyx
+# For Onyx open-source project
+# Full configuration with Docker Compose and all setup steps
+cp onyx-setup.json ~/onyx/.worktree-setup.json
+
+# Or use the simplified example without Docker
 cp onyx-setup.example.json ~/onyx/.worktree-setup.json
 
 # Or create your own
@@ -277,6 +283,17 @@ cat > ~/myproject/.worktree-setup.json << 'EOF'
 }
 EOF
 ```
+
+### Real-World Example: Onyx
+
+This tool was built for the [Onyx](https://github.com/danswer-ai/danswer) open-source project. See [`onyx-setup.json`](onyx-setup.json) for a complete configuration including:
+- Docker Compose service management (PostgreSQL, Redis, Vespa, Minio)
+- Python virtual environment setup
+- Backend and frontend dependency installation
+- Pre-commit hooks
+- Playwright browsers
+
+The configuration enables running multiple Onyx worktrees simultaneously with isolated services on different ports.
 
 ### Available Setup Steps
 

@@ -260,9 +260,12 @@ class SetupExecutor:
                 )
             return result
         except subprocess.CalledProcessError as e:
-            print(f"{self.colors.RED}Command failed: {cmd if isinstance(cmd, str) else ' '.join(cmd)}{self.colors.END}")
+            # Print error on new line after spinner is cleared
+            print(f"\n{self.colors.RED}Command failed: {cmd if isinstance(cmd, str) else ' '.join(cmd)}{self.colors.END}")
             if e.stderr:
                 print(f"{self.colors.RED}{e.stderr}{self.colors.END}")
+            if e.stdout:
+                print(f"{e.stdout}")
             raise
 
     def _print_step(self, message: str):
