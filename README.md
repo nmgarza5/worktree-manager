@@ -23,16 +23,29 @@ Just create a new worktree and start coding!
 ## Installation
 
 ```bash
-cd /Users/nikolas/worktree-manager
 ./install.sh
 ```
 
-Make sure `~/.local/bin` is in your PATH:
+Then add to your shell configuration:
 
+**For Zsh (`~/.zshrc`):**
 ```bash
-export PATH="$HOME/.local/bin:$PATH"  # Add to ~/.zshrc or ~/.bashrc
-source ~/.zshrc  # Reload shell
+export PATH="$HOME/.local/bin:$PATH"
+source ~/.worktree-wrapper.sh
 ```
+
+**For Bash (`~/.bashrc` or `~/.bash_profile`):**
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+source ~/.worktree-wrapper.sh
+```
+
+Reload your shell:
+```bash
+source ~/.zshrc  # or source ~/.bashrc
+```
+
+**Note:** The shell wrapper enables the `select` command to automatically change directories.
 
 ## Quick Start
 
@@ -129,15 +142,12 @@ Location: /Users/you/onyx-worktrees
 worktree <repo> select <name>
 ```
 
-Shows commands to switch:
-```
-Switching to worktree 'feature-auth'
-Path: /Users/you/onyx-worktrees/feature-auth
-Branch: feature-auth
+**Automatically changes to the worktree directory!** (requires shell wrapper setup)
 
-Run the following commands:
-  cd /Users/you/onyx-worktrees/feature-auth
-  source .venv/bin/activate
+```bash
+worktree onyx select feature-auth
+# You are now in /Users/you/onyx-worktrees/feature-auth
+# Virtual environment activated automatically if present
 ```
 
 #### Remove Worktree

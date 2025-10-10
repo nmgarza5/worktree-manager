@@ -371,11 +371,6 @@ class WorktreeManager:
                         print(f"{Colors.YELLOW}Continuing with remaining steps...{Colors.END}")
 
         print(f"\n{Colors.GREEN}{Colors.BOLD}✓ Worktree '{name}' is ready!{Colors.END}")
-        print(f"\nLocation: {worktree_path}")
-        print(f"\nTo start working:")
-        print(f"  cd {worktree_path}")
-        if (worktree_path / ".venv" / "bin" / "activate").exists():
-            print(f"  source .venv/bin/activate")
 
     def remove_worktree(self, name: str, force: bool = False):
         """Remove a worktree and clean up its branch"""
@@ -408,7 +403,7 @@ class WorktreeManager:
 
         print(f"\n{Colors.GREEN}✓ Worktree '{name}' removed successfully{Colors.END}")
 
-    def select_worktree(self, name: str):
+    def select_worktree(self, name: str, output_cd_command: bool = False):
         """Switch to a worktree"""
         worktree_path = self._get_worktree_path(name)
 
@@ -422,14 +417,20 @@ class WorktreeManager:
 
         venv_activate = worktree_path / ".venv" / "bin" / "activate"
 
-        print(f"{Colors.GREEN}Switching to worktree '{name}'{Colors.END}")
-        print(f"Path: {worktree_path}")
-        print(f"Branch: {existing_worktrees[name]}")
+        if output_cd_command:
+            # Output just the cd command for shell function to eval
+            print(f"cd {worktree_path}")
+            if venv_activate.exists():
+                print(f"source .venv/bin/activate")
+        else:
+            print(f"{Colors.GREEN}Switching to worktree '{name}'{Colors.END}")
+            print(f"Path: {worktree_path}")
+            print(f"Branch: {existing_worktrees[name]}")
 
-        print(f"\n{Colors.YELLOW}Run the following commands:{Colors.END}")
-        print(f"  cd {worktree_path}")
-        if venv_activate.exists():
-            print(f"  source .venv/bin/activate")
+            print(f"\n{Colors.YELLOW}Run the following commands:{Colors.END}")
+            print(f"  cd {worktree_path}")
+            if venv_activate.exists():
+                print(f"  source .venv/bin/activate")
 
     def list_worktrees(self):
         """List all existing worktrees"""
@@ -486,6 +487,7 @@ def main():
         # Select command
         select_parser = wt_subparsers.add_parser("select", help="Switch to a worktree")
         select_parser.add_argument("name", help="Name of the worktree to switch to")
+        select_parser.add_argument("--shell-mode", action="store_true", help=argparse.SUPPRESS)  # Hidden flag for shell wrapper
 
         # List command
         wt_subparsers.add_parser("list", help="List all worktrees")
@@ -503,7 +505,7 @@ def main():
         elif wt_args.wt_command == "rm":
             manager.remove_worktree(wt_args.name, wt_args.force)
         elif wt_args.wt_command == "select":
-            manager.select_worktree(wt_args.name)
+            manager.select_worktree(wt_args.name, getattr(wt_args, 'shell_mode', False))
         elif wt_args.wt_command == "list":
             manager.list_worktrees()
         return
