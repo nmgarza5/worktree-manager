@@ -2,7 +2,7 @@
 """
 Git Worktree Manager
 
-A generic tool to manage git worktrees with optional environment setup.
+A tool to manage git worktrees across multiple repositories from anywhere.
 """
 
 import argparse
@@ -24,6 +24,88 @@ class Colors:
     END = '\033[0m'
 
 
+class RepoConfig:
+    """Manages repository configuration"""
+
+    def __init__(self):
+        self.config_file = Path.home() / ".worktree-repos.json"
+        self.repos = self._load_repos()
+
+    def _load_repos(self) -> Dict[str, str]:
+        """Load repository aliases from config file"""
+        if not self.config_file.exists():
+            return {}
+
+        try:
+            with open(self.config_file, 'r') as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            print(f"{Colors.RED}Error: Invalid JSON in {self.config_file}{Colors.END}")
+            return {}
+
+    def _save_repos(self):
+        """Save repository aliases to config file"""
+        self.config_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.config_file, 'w') as f:
+            json.dump(self.repos, f, indent=2)
+
+    def add_repo(self, alias: str, path: str):
+        """Add a repository alias"""
+        repo_path = Path(path).expanduser().resolve()
+
+        if not repo_path.exists():
+            print(f"{Colors.RED}Error: Path does not exist: {repo_path}{Colors.END}")
+            sys.exit(1)
+
+        # Verify it's a git repository
+        if not (repo_path / ".git").exists():
+            result = subprocess.run(
+                ["git", "rev-parse", "--git-dir"],
+                cwd=repo_path,
+                capture_output=True,
+                text=True
+            )
+            if result.returncode != 0:
+                print(f"{Colors.RED}Error: Not a git repository: {repo_path}{Colors.END}")
+                sys.exit(1)
+
+        self.repos[alias] = str(repo_path)
+        self._save_repos()
+        print(f"{Colors.GREEN}✓{Colors.END} Added repository alias '{alias}' -> {repo_path}")
+
+    def remove_repo(self, alias: str):
+        """Remove a repository alias"""
+        if alias not in self.repos:
+            print(f"{Colors.RED}Error: Repository alias '{alias}' not found{Colors.END}")
+            sys.exit(1)
+
+        del self.repos[alias]
+        self._save_repos()
+        print(f"{Colors.GREEN}✓{Colors.END} Removed repository alias '{alias}'")
+
+    def list_repos(self):
+        """List all repository aliases"""
+        if not self.repos:
+            print(f"{Colors.YELLOW}No repositories configured{Colors.END}")
+            print(f"\nAdd a repository with:")
+            print(f"  worktree repo add <alias> <path>")
+            return
+
+        print(f"{Colors.BOLD}Configured repositories:{Colors.END}\n")
+        for alias, path in sorted(self.repos.items()):
+            exists = Path(path).exists()
+            indicator = f"{Colors.GREEN}✓{Colors.END}" if exists else f"{Colors.RED}✗{Colors.END}"
+            print(f"  {indicator} {Colors.BOLD}{alias}{Colors.END}")
+            print(f"      {path}")
+            print()
+
+    def get_repo_path(self, alias: str) -> Optional[Path]:
+        """Get repository path from alias"""
+        if alias not in self.repos:
+            return None
+        return Path(self.repos[alias])
+
+
 class SetupExecutor:
     """Executes setup steps based on configuration"""
 
@@ -37,7 +119,6 @@ class SetupExecutor:
         """Run a shell command"""
         try:
             if shell:
-                # For shell commands, join the list into a string
                 cmd_str = ' '.join(cmd) if isinstance(cmd, list) else cmd
                 result = subprocess.run(
                     cmd_str,
@@ -159,19 +240,14 @@ class SetupExecutor:
     def _run_custom_command(self, command: str, cwd: Optional[str] = None):
         """Run a custom shell command"""
         work_dir = self.worktree_path / cwd if cwd else self.worktree_path
-        # Run as shell command to support complex commands
         self._run_command([command], cwd=work_dir, shell=True)
 
 
 class WorktreeManager:
     """Manages git worktrees with optional setup configuration"""
 
-    def __init__(self, repo_path: Optional[str] = None):
-        # Use provided repo path or current directory
-        if repo_path:
-            self.main_repo = Path(repo_path).expanduser().resolve()
-        else:
-            self.main_repo = Path.cwd()
+    def __init__(self, repo_path: Path):
+        self.main_repo = repo_path
 
         # Verify it's a git repository
         if not (self.main_repo / ".git").exists():
@@ -191,7 +267,6 @@ class WorktreeManager:
 
     def _load_setup_config(self) -> Optional[Dict]:
         """Load setup configuration if it exists"""
-        # Look for setup config in common locations
         possible_configs = [
             self.main_repo / ".worktree-setup.json",
             Path.home() / ".worktree-setup.json",
@@ -259,7 +334,6 @@ class WorktreeManager:
             elif line.startswith('branch '):
                 current_branch = line.split('refs/heads/', 1)[1] if 'refs/heads/' in line else 'detached'
                 if current_path and current_path != str(self.main_repo):
-                    # Only include worktrees in our worktree directory
                     if str(self.worktree_base) in current_path:
                         worktrees[Path(current_path).name] = current_branch
                 current_path = None
@@ -271,22 +345,18 @@ class WorktreeManager:
         """Create a new worktree with optional environment setup"""
         worktree_path = self._get_worktree_path(name)
 
-        # Check if worktree already exists
         if worktree_path.exists():
             print(f"{Colors.RED}Error: Worktree '{name}' already exists at {worktree_path}{Colors.END}")
             sys.exit(1)
 
-        # Create worktrees directory if it doesn't exist
         self.worktree_base.mkdir(exist_ok=True)
 
-        # Create worktree and branch
         self._print_step(f"Creating worktree '{name}' from {base_branch}")
         self._run_command([
             "git", "worktree", "add", "-b", name, str(worktree_path), base_branch
         ])
         self._print_success(f"Worktree created at {worktree_path}")
 
-        # Execute setup steps if config exists and not skipped
         if not skip_setup:
             setup_config = self._load_setup_config()
             if setup_config and "setup_steps" in setup_config:
@@ -311,26 +381,22 @@ class WorktreeManager:
         """Remove a worktree and clean up its branch"""
         worktree_path = self._get_worktree_path(name)
 
-        # Check if worktree exists
         existing_worktrees = self._get_existing_worktrees()
         if name not in existing_worktrees:
             print(f"{Colors.RED}Error: Worktree '{name}' not found{Colors.END}")
             sys.exit(1)
 
-        # Confirm deletion unless force flag is used
         if not force:
             response = input(f"Are you sure you want to remove worktree '{name}'? [y/N]: ")
             if response.lower() != 'y':
                 print("Cancelled.")
                 return
 
-        # Remove worktree
         self._print_step(f"Removing worktree '{name}'")
         force_flag = ["--force"] if force else []
         self._run_command(["git", "worktree", "remove", *force_flag, str(worktree_path)])
         self._print_success(f"Worktree removed: {worktree_path}")
 
-        # Delete branch if it exists
         branch_name = existing_worktrees[name]
         if branch_name != 'detached':
             try:
@@ -346,7 +412,6 @@ class WorktreeManager:
         """Switch to a worktree"""
         worktree_path = self._get_worktree_path(name)
 
-        # Check if worktree exists
         existing_worktrees = self._get_existing_worktrees()
         if name not in existing_worktrees:
             print(f"{Colors.RED}Error: Worktree '{name}' not found{Colors.END}")
@@ -389,76 +454,117 @@ class WorktreeManager:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Git Worktree Manager - Manage git worktrees with optional environment setup",
+        description="Git Worktree Manager - Manage worktrees across multiple repositories from anywhere",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  worktree new feature-xyz              Create a new worktree
-  worktree new hotfix --base main       Create from a different branch
-  worktree new test --skip-setup        Create without running setup
-  worktree list                         List all worktrees
-  worktree select feature-xyz           Switch to a worktree
-  worktree rm feature-xyz               Remove a worktree
+  # Configure repositories
+  worktree repo add onyx ~/onyx
+  worktree repo add myapp ~/projects/myapp
+  worktree repo list
 
-Setup Configuration:
-  Place a .worktree-setup.json file in your repository root or home directory
-  to automatically run setup commands when creating new worktrees.
+  # Manage worktrees from anywhere
+  worktree onyx new feature-xyz           Create worktree in onyx repo
+  worktree onyx list                      List onyx worktrees
+  worktree myapp new hotfix               Create worktree in myapp repo
+  worktree myapp select hotfix            Switch to myapp hotfix worktree
+  worktree onyx rm feature-xyz            Remove onyx worktree
         """
-    )
-
-    parser.add_argument(
-        "--repo",
-        help="Path to git repository (default: current directory)"
     )
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
-    # New command
-    new_parser = subparsers.add_parser("new", help="Create a new worktree")
-    new_parser.add_argument("name", help="Name of the worktree (will also be the branch name)")
-    new_parser.add_argument(
-        "--base",
-        default="origin/main",
-        help="Base branch to create worktree from (default: origin/main)"
-    )
-    new_parser.add_argument(
-        "--skip-setup",
-        action="store_true",
-        help="Skip running setup steps even if config exists"
-    )
+    # Repo management commands
+    repo_parser = subparsers.add_parser("repo", help="Manage repository aliases")
+    repo_subparsers = repo_parser.add_subparsers(dest="repo_command")
 
-    # Remove command
-    rm_parser = subparsers.add_parser("rm", help="Remove a worktree")
-    rm_parser.add_argument("name", help="Name of the worktree to remove")
-    rm_parser.add_argument(
-        "--force", "-f",
-        action="store_true",
-        help="Force removal without confirmation"
-    )
+    repo_add = repo_subparsers.add_parser("add", help="Add a repository alias")
+    repo_add.add_argument("alias", help="Alias name for the repository")
+    repo_add.add_argument("path", help="Path to the git repository")
 
-    # Select command
-    select_parser = subparsers.add_parser("select", help="Switch to a worktree")
-    select_parser.add_argument("name", help="Name of the worktree to switch to")
+    repo_rm = repo_subparsers.add_parser("rm", help="Remove a repository alias")
+    repo_rm.add_argument("alias", help="Alias to remove")
 
-    # List command
-    list_parser = subparsers.add_parser("list", help="List all worktrees")
+    repo_list = repo_subparsers.add_parser("list", help="List all repository aliases")
 
-    args = parser.parse_args()
+    args, remaining = parser.parse_known_args()
 
-    if not args.command:
+    # Handle repo management commands
+    if args.command == "repo":
+        config = RepoConfig()
+        if args.repo_command == "add":
+            config.add_repo(args.alias, args.path)
+        elif args.repo_command == "rm":
+            config.remove_repo(args.alias)
+        elif args.repo_command == "list":
+            config.list_repos()
+        else:
+            repo_parser.print_help()
+        return
+
+    # If first arg is not 'repo', treat it as a repository alias
+    if args.command and args.command != "repo":
+        repo_alias = args.command
+        config = RepoConfig()
+        repo_path = config.get_repo_path(repo_alias)
+
+        if not repo_path:
+            print(f"{Colors.RED}Error: Unknown repository alias '{repo_alias}'{Colors.END}")
+            print(f"\nConfigured repositories:")
+            config.list_repos()
+            print(f"\nAdd a repository with:")
+            print(f"  worktree repo add {repo_alias} <path>")
+            sys.exit(1)
+
+        if not repo_path.exists():
+            print(f"{Colors.RED}Error: Repository path no longer exists: {repo_path}{Colors.END}")
+            sys.exit(1)
+
+        # Parse the actual worktree command
+        wt_parser = argparse.ArgumentParser()
+        wt_subparsers = wt_parser.add_subparsers(dest="wt_command")
+
+        # New command
+        new_parser = wt_subparsers.add_parser("new")
+        new_parser.add_argument("name")
+        new_parser.add_argument("--base", default="origin/main")
+        new_parser.add_argument("--skip-setup", action="store_true")
+
+        # Remove command
+        rm_parser = wt_subparsers.add_parser("rm")
+        rm_parser.add_argument("name")
+        rm_parser.add_argument("--force", "-f", action="store_true")
+
+        # Select command
+        select_parser = wt_subparsers.add_parser("select")
+        select_parser.add_argument("name")
+
+        # List command
+        wt_subparsers.add_parser("list")
+
+        wt_args = wt_parser.parse_args(remaining)
+
+        if not wt_args.wt_command:
+            print(f"{Colors.YELLOW}Usage: worktree {repo_alias} <command>{Colors.END}")
+            print(f"\nAvailable commands:")
+            print(f"  new <name>      Create a new worktree")
+            print(f"  list            List all worktrees")
+            print(f"  select <name>   Switch to a worktree")
+            print(f"  rm <name>       Remove a worktree")
+            sys.exit(1)
+
+        manager = WorktreeManager(repo_path)
+
+        if wt_args.wt_command == "new":
+            manager.create_worktree(wt_args.name, wt_args.base, wt_args.skip_setup)
+        elif wt_args.wt_command == "rm":
+            manager.remove_worktree(wt_args.name, wt_args.force)
+        elif wt_args.wt_command == "select":
+            manager.select_worktree(wt_args.name)
+        elif wt_args.wt_command == "list":
+            manager.list_worktrees()
+    else:
         parser.print_help()
-        sys.exit(1)
-
-    manager = WorktreeManager(repo_path=args.repo)
-
-    if args.command == "new":
-        manager.create_worktree(args.name, args.base, args.skip_setup)
-    elif args.command == "rm":
-        manager.remove_worktree(args.name, args.force)
-    elif args.command == "select":
-        manager.select_worktree(args.name)
-    elif args.command == "list":
-        manager.list_worktrees()
 
 
 if __name__ == "__main__":

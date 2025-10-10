@@ -1,13 +1,24 @@
 # Worktree Manager
 
-A simple, generic CLI tool for managing git worktrees with optional environment setup.
+A simple CLI tool for managing git worktrees across multiple repositories **from anywhere**.
+
+## Why Use This?
+
+Work on multiple branches simultaneously without:
+- Stashing changes
+- Switching branches
+- Rebuilding dependencies
+- Losing context
+
+Just create a new worktree and start coding!
 
 ## Features
 
-- **Universal**: Works with any git repository
-- **Organized**: Stores worktrees in a dedicated `<repo-name>-worktrees` directory
-- **Optional Setup**: Configure automated environment setup per repository
-- **Simple**: Just 4 commands to manage your workflow
+- **Manage from anywhere**: `worktree onyx new feature-xyz` works from any directory
+- **Multiple repos**: Configure aliases for all your repositories
+- **Organized**: Worktrees stored in `<repo-name>-worktrees` directories
+- **Optional setup**: Automated environment setup per repository
+- **Simple**: Just configure once, then use 4 commands
 
 ## Installation
 
@@ -16,248 +27,171 @@ cd /Users/nikolas/worktree-manager
 ./install.sh
 ```
 
-The script will install the `worktree` command to `~/.local/bin`.
-
-If `~/.local/bin` isn't in your PATH, add this to your `~/.zshrc` or `~/.bashrc`:
+Make sure `~/.local/bin` is in your PATH:
 
 ```bash
-export PATH="$HOME/.local/bin:$PATH"
+export PATH="$HOME/.local/bin:$PATH"  # Add to ~/.zshrc or ~/.bashrc
+source ~/.zshrc  # Reload shell
 ```
-
-Then reload: `source ~/.zshrc`
 
 ## Quick Start
 
+### 1. Configure Your Repositories
+
 ```bash
-# Navigate to your git repository
-cd ~/my-project
+# Add repository aliases
+worktree repo add onyx ~/onyx
+worktree repo add myapp ~/projects/myapp
 
-# Create a new worktree
-worktree new feature-xyz
+# List configured repos
+worktree repo list
+```
 
-# List all worktrees
-worktree list
+### 2. Manage Worktrees from Anywhere
 
-# Switch to a worktree (shows commands to run)
-worktree select feature-xyz
+```bash
+# From ANY directory:
+worktree onyx new feature-xyz        # Create worktree
+worktree onyx list                   # List worktrees
+worktree onyx select feature-xyz     # Get switch commands
+worktree onyx rm feature-xyz         # Remove worktree
 
-# Remove a worktree
-worktree rm feature-xyz
+# Different repo, same commands:
+worktree myapp new hotfix-123
+worktree myapp list
+worktree myapp rm hotfix-123
+```
+
+## Commands
+
+### Repository Management
+
+```bash
+# Add a repository alias
+worktree repo add <alias> <path>
+
+# List all configured repositories
+worktree repo list
+
+# Remove a repository alias
+worktree repo rm <alias>
+```
+
+**Example:**
+```bash
+worktree repo add onyx ~/onyx
+worktree repo add dotfiles ~/.dotfiles
+worktree repo list
+```
+
+### Worktree Commands
+
+All worktree commands follow this pattern: `worktree <repo-alias> <command>`
+
+#### Create Worktree
+
+```bash
+worktree <repo> new <name>                    # From origin/main
+worktree <repo> new <name> --base develop     # From different branch
+worktree <repo> new <name> --skip-setup       # Skip automated setup
+```
+
+**Examples:**
+```bash
+worktree onyx new feature-auth
+worktree onyx new hotfix-123 --base origin/production
+worktree myapp new quick-test --skip-setup
+```
+
+#### List Worktrees
+
+```bash
+worktree <repo> list
+```
+
+**Output:**
+```
+Existing worktrees:
+Location: /Users/you/onyx-worktrees
+
+  ✓ feature-auth
+    Branch: feature-auth
+    Path: /Users/you/onyx-worktrees/feature-auth
+
+  ✓ hotfix-123
+    Branch: hotfix-123
+    Path: /Users/you/onyx-worktrees/hotfix-123
+```
+
+#### Switch to Worktree
+
+```bash
+worktree <repo> select <name>
+```
+
+Shows commands to switch:
+```
+Switching to worktree 'feature-auth'
+Path: /Users/you/onyx-worktrees/feature-auth
+Branch: feature-auth
+
+Run the following commands:
+  cd /Users/you/onyx-worktrees/feature-auth
+  source .venv/bin/activate
+```
+
+#### Remove Worktree
+
+```bash
+worktree <repo> rm <name>            # With confirmation
+worktree <repo> rm <name> --force    # Skip confirmation
 ```
 
 ## How It Works
 
-### Worktree Organization
-
-Worktrees are stored in a separate directory alongside your main repository:
+### Directory Structure
 
 ```
 ~/
-  my-project/              # Your main repository
-  my-project-worktrees/    # Worktrees directory
+  onyx/                # Main repository
+  onyx-worktrees/      # All onyx worktrees
     ├── feature-auth/
-    ├── bugfix-api/
+    ├── hotfix-123/
     └── refactor-db/
+
+  myapp/               # Another repository
+  myapp-worktrees/     # All myapp worktrees
+    ├── feature-xyz/
+    └── bugfix-456/
 ```
 
-This keeps your main repository clean and all worktrees organized in one place.
+### Repository Configuration
 
-### Git Worktrees
+Repository aliases are stored in `~/.worktree-repos.json`:
 
-Each worktree:
-- Has its own working directory
-- Has its own branch
-- Shares git history with the main repo (no duplication!)
-- Can have its own dependencies, virtual environment, etc.
-
-Work on multiple branches simultaneously without stashing or switching!
-
-## Commands
-
-### `worktree new <name>`
-
-Create a new worktree and branch.
-
-```bash
-# Create from origin/main (default)
-worktree new feature-xyz
-
-# Create from a different branch
-worktree new hotfix --base origin/develop
-
-# Skip automatic setup
-worktree new quick-test --skip-setup
+```json
+{
+  "onyx": "/Users/you/onyx",
+  "myapp": "/Users/you/projects/myapp"
+}
 ```
 
-### `worktree list`
-
-List all worktrees for the current repository.
-
-```bash
-worktree list
-```
-
-Example output:
-```
-Existing worktrees:
-Location: /Users/you/my-project-worktrees
-
-  ✓ feature-auth
-    Branch: feature-auth
-    Path: /Users/you/my-project-worktrees/feature-auth
-
-  ✓ bugfix-api
-    Branch: bugfix-api
-    Path: /Users/you/my-project-worktrees/bugfix-api
-```
-
-### `worktree select <name>`
-
-Show commands to switch to a worktree.
-
-```bash
-worktree select feature-xyz
-```
-
-Output:
-```
-Switching to worktree 'feature-xyz'
-Path: /Users/you/my-project-worktrees/feature-xyz
-Branch: feature-xyz
-
-Run the following commands:
-  cd /Users/you/my-project-worktrees/feature-xyz
-  source .venv/bin/activate
-```
-
-### `worktree rm <name>`
-
-Remove a worktree and delete its branch.
-
-```bash
-# With confirmation
-worktree rm feature-xyz
-
-# Skip confirmation
-worktree rm feature-xyz --force
-```
+You manage this with `worktree repo` commands.
 
 ## Optional: Automated Setup
 
-You can configure automated environment setup to run when creating new worktrees.
+Configure automated environment setup to run when creating new worktrees.
 
 ### Setup Configuration
 
-Create a `.worktree-setup.json` file in either:
-- Your repository root: `~/my-project/.worktree-setup.json`
-- Your home directory: `~/.worktree-setup.json`
+Create `.worktree-setup.json` in your repository root:
 
-The tool will automatically run these setup steps when creating new worktrees.
+```bash
+# For Onyx
+cp onyx-setup.example.json ~/onyx/.worktree-setup.json
 
-### Configuration Format
-
-```json
-{
-  "setup_steps": [
-    {
-      "name": "Display name",
-      "type": "step_type",
-      "...": "additional parameters"
-    }
-  ]
-}
-```
-
-### Available Setup Steps
-
-#### Create Python Virtual Environment
-
-```json
-{
-  "name": "Python virtual environment",
-  "type": "python_venv"
-}
-```
-
-#### Install Python Dependencies
-
-```json
-{
-  "name": "Python dependencies",
-  "type": "pip_install",
-  "requirements": [
-    "requirements.txt",
-    "requirements-dev.txt"
-  ]
-}
-```
-
-#### Install Package in Editable Mode
-
-```json
-{
-  "name": "Install package",
-  "type": "pip_install_editable",
-  "path": "."
-}
-```
-
-#### Install Specific Python Package
-
-```json
-{
-  "name": "Install pre-commit",
-  "type": "pip_install_package",
-  "package": "pre-commit"
-}
-```
-
-#### Install Playwright
-
-```json
-{
-  "name": "Playwright browsers",
-  "type": "playwright_install"
-}
-```
-
-#### Setup Pre-commit Hooks
-
-```json
-{
-  "name": "Pre-commit hooks",
-  "type": "precommit_install",
-  "path": "."
-}
-```
-
-#### Install Node Dependencies
-
-```json
-{
-  "name": "Node dependencies",
-  "type": "npm_install",
-  "path": "."
-}
-```
-
-#### Run Custom Command
-
-```json
-{
-  "name": "Run migrations",
-  "type": "command",
-  "command": "python manage.py migrate",
-  "cwd": "."
-}
-```
-
-## Example Configurations
-
-### Python Project
-
-`.worktree-setup.json`:
-```json
+# Or create your own
+cat > ~/myproject/.worktree-setup.json << 'EOF'
 {
   "setup_steps": [
     {
@@ -271,136 +205,122 @@ The tool will automatically run these setup steps when creating new worktrees.
     }
   ]
 }
+EOF
 ```
 
-### Node.js Project
+### Available Setup Steps
 
-`.worktree-setup.json`:
-```json
-{
-  "setup_steps": [
-    {
-      "name": "Install dependencies",
-      "type": "npm_install",
-      "path": "."
-    }
-  ]
-}
-```
+**Python:**
+- `python_venv` - Create virtual environment
+- `pip_install` - Install from requirements files
+- `pip_install_editable` - Install package in editable mode
+- `pip_install_package` - Install specific package
+- `playwright_install` - Install Playwright browsers
+- `precommit_install` - Setup pre-commit hooks
 
-### Full-Stack Project
+**Node.js:**
+- `npm_install` - Install Node dependencies
 
-`.worktree-setup.json`:
-```json
-{
-  "setup_steps": [
-    {
-      "name": "Python virtual environment",
-      "type": "python_venv"
-    },
-    {
-      "name": "Backend dependencies",
-      "type": "pip_install",
-      "requirements": ["backend/requirements.txt"]
-    },
-    {
-      "name": "Frontend dependencies",
-      "type": "npm_install",
-      "path": "frontend"
-    }
-  ]
-}
-```
+**Custom:**
+- `command` - Run custom shell command
 
-### Onyx Project
+See `onyx-setup.example.json` for a complete configuration example.
 
-See `onyx-setup.example.json` for a complete Onyx setup configuration.
-
-To use it:
-```bash
-cp onyx-setup.example.json ~/onyx/.worktree-setup.json
-```
-
-## Usage Patterns
+## Workflow Examples
 
 ### Feature Development
 
 ```bash
-cd ~/my-project
-worktree new feature-auth
-cd ../my-project-worktrees/feature-auth
+# From anywhere
+worktree onyx new feature-auth
+
+# Switch to it
+cd ~/onyx-worktrees/feature-auth
+source .venv/bin/activate
 
 # Work on feature...
 git add .
 git commit -m "Add authentication"
 git push origin feature-auth
 
-# Back to main project
-cd ~/my-project
-
 # Clean up when done
-worktree rm feature-auth
+worktree onyx rm feature-auth
 ```
 
-### Multiple Features in Parallel
+### Multiple Features
 
 ```bash
-cd ~/my-project
+# Start multiple features (from anywhere!)
+worktree onyx new feature-a
+worktree onyx new feature-b
 
-# Start two features
-worktree new feature-a
-worktree new feature-b
+# Switch between them
+cd ~/onyx-worktrees/feature-a
+# work...
 
-# Work on feature A
-cd ../my-project-worktrees/feature-a
-# ... make changes ...
+cd ~/onyx-worktrees/feature-b
+# work...
 
-# Switch to feature B
-cd ../feature-b
-# ... make changes ...
-
-# List all active worktrees
-cd ~/my-project
-worktree list
+# Check all active worktrees
+worktree onyx list
 ```
 
-### Hotfix While Working on Feature
+### Emergency Hotfix
 
 ```bash
-# Currently working on a feature
-cd ~/my-project-worktrees/my-feature
+# Currently working in feature-a
+cd ~/onyx-worktrees/feature-a
 
-# Need to create a hotfix
-cd ~/my-project
-worktree new hotfix-123 --base origin/main
+# Emergency hotfix needed! Create from production
+worktree onyx new hotfix-123 --base origin/production
 
-cd ../my-project-worktrees/hotfix-123
-# Fix the bug, commit, push
+# Fix the bug
+cd ~/onyx-worktrees/hotfix-123
+# fix, commit, push...
 
-# Clean up hotfix
-cd ~/my-project
-worktree rm hotfix-123
+# Clean up and return to feature
+worktree onyx rm hotfix-123
+cd ~/onyx-worktrees/feature-a
+```
 
-# Return to feature work
-cd ../my-project-worktrees/my-feature
+### Multiple Repositories
+
+```bash
+# Configure multiple repos
+worktree repo add frontend ~/work/frontend
+worktree repo add backend ~/work/backend
+worktree repo add docs ~/work/docs
+
+# Work across all of them simultaneously
+worktree frontend new feature-xyz
+worktree backend new feature-xyz
+worktree docs new feature-xyz
+
+# Check status across all repos
+worktree frontend list
+worktree backend list
+worktree docs list
 ```
 
 ## Advanced Usage
 
-### Different Repository
-
-By default, the tool uses the current directory. To specify a different repository:
+### Different Base Branch
 
 ```bash
-worktree --repo ~/other-project new feature-xyz
+worktree onyx new my-branch --base origin/develop
+worktree onyx new hotfix --base origin/v1.2.3
 ```
 
-### Skip Setup
-
-If you have a setup configuration but want to skip it for a specific worktree:
+### Skip Automated Setup
 
 ```bash
-worktree new quick-test --skip-setup
+worktree onyx new quick-test --skip-setup
+```
+
+### Remove Without Confirmation
+
+```bash
+worktree onyx rm old-feature --force
 ```
 
 ## Troubleshooting
@@ -412,54 +332,62 @@ Ensure `~/.local/bin` is in your PATH:
 echo $PATH | grep ".local/bin"
 ```
 
-### Not a git repository
+### Repository not found
 
-Make sure you're in a git repository:
+List configured repositories:
 ```bash
-cd ~/my-project
-git status
+worktree repo list
+```
+
+Add missing repository:
+```bash
+worktree repo add myrepo ~/path/to/repo
 ```
 
 ### Setup fails
 
-Setup steps will continue even if one fails. Check the error message and ensure required tools (python3, npm, etc.) are installed.
-
-### Worktree already exists
-
-Use `worktree list` to see existing worktrees, then either remove the old one or choose a different name.
+Setup steps continue even if one fails. Check the error and ensure required tools are installed:
+- Python 3.7+
+- Node.js (if using npm steps)
+- Additional tools as specified in your setup config
 
 ## Requirements
 
 - Python 3.7+
 - Git 2.5+ (for worktree support)
-- Additional tools as needed by your setup configuration (pip, npm, etc.)
+- Additional tools as needed by your setup configuration
 
-## Why Use Worktrees?
+## Why Worktrees?
 
-**Instead of:**
+**Traditional workflow:**
 ```bash
+# Working on feature-a
+git add .
 git stash
 git checkout main
-git checkout -b new-feature
-# work...
-git checkout previous-branch
+git checkout -b hotfix
+# fix bug
+git checkout feature-a
 git stash pop
+# conflicts? dependencies changed?
 ```
 
-**Simply:**
+**With worktree manager:**
 ```bash
-worktree new new-feature
-cd ../my-project-worktrees/new-feature
-# work...
+# Working on feature-a
+worktree onyx new hotfix
+cd ~/onyx-worktrees/hotfix
+# fix bug, commit, done
+cd ~/onyx-worktrees/feature-a
+# continue exactly where you left off
 ```
 
-No more:
-- Stashing changes
-- Switching branches
-- Rebuilding dependencies
-- Losing context
-
-Just create a new worktree and start coding!
+Benefits:
+- No stashing
+- No branch switching
+- Each worktree has its own dependencies
+- Work on multiple features simultaneously
+- No context loss
 
 ## License
 
