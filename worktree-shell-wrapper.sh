@@ -54,9 +54,14 @@ worktree() {
         "$HOME/.local/bin/worktree" "$@"
         local exit_code=$?
 
-        # If successful and we were in that directory, cd to parent
+        # If successful and we were in that directory, cd to parent and deactivate venv
         if [[ $exit_code -eq 0 && -n "$worktree_info" ]]; then
             if [[ "$PWD" == "$worktree_info"* ]]; then
+                # Deactivate virtual environment if active
+                if [[ -n "$VIRTUAL_ENV" ]]; then
+                    deactivate 2>/dev/null
+                fi
+
                 cd "$(dirname "$worktree_info")" 2>/dev/null || cd "$HOME"
                 echo ""
                 echo "📂 Moved to $(pwd)"
