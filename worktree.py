@@ -106,6 +106,88 @@ class RepoConfig:
         return Path(self.repos[alias])
 
 
+class WorktreeMetadata:
+    """Manages worktree metadata including port assignments"""
+
+    def __init__(self):
+        self.metadata_file = Path.home() / ".worktree-metadata.json"
+        self.metadata = self._load_metadata()
+
+    def _load_metadata(self) -> Dict[str, Dict[str, Any]]:
+        """Load worktree metadata from config file"""
+        if not self.metadata_file.exists():
+            return {}
+
+        try:
+            with open(self.metadata_file, 'r') as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            print(f"{Colors.RED}Error: Invalid JSON in {self.metadata_file}{Colors.END}")
+            return {}
+
+    def _save_metadata(self):
+        """Save worktree metadata to config file"""
+        self.metadata_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.metadata_file, 'w') as f:
+            json.dump(self.metadata, f, indent=2)
+
+    def get_next_port_offset(self, repo_alias: str) -> int:
+        """Get the next available port offset for a repository"""
+        if repo_alias not in self.metadata:
+            return 0
+
+        used_offsets = [
+            wt_data.get('port_offset', 0)
+            for wt_data in self.metadata[repo_alias].values()
+        ]
+
+        if not used_offsets:
+            return 0
+
+        # Find next available offset (increment by 10)
+        next_offset = 0
+        while next_offset in used_offsets:
+            next_offset += 10
+
+        return next_offset
+
+    def add_worktree(self, repo_alias: str, worktree_name: str, port_offset: int, ports: Dict[str, int]):
+        """Add worktree metadata"""
+        if repo_alias not in self.metadata:
+            self.metadata[repo_alias] = {}
+
+        self.metadata[repo_alias][worktree_name] = {
+            'port_offset': port_offset,
+            'ports': ports,
+            'created': subprocess.run(['date', '+%Y-%m-%d'], capture_output=True, text=True).stdout.strip()
+        }
+
+        self._save_metadata()
+
+    def remove_worktree(self, repo_alias: str, worktree_name: str):
+        """Remove worktree metadata"""
+        if repo_alias in self.metadata and worktree_name in self.metadata[repo_alias]:
+            del self.metadata[repo_alias][worktree_name]
+
+            # Clean up empty repo entries
+            if not self.metadata[repo_alias]:
+                del self.metadata[repo_alias]
+
+            self._save_metadata()
+
+    def get_worktree_ports(self, repo_alias: str, worktree_name: str) -> Optional[Dict[str, int]]:
+        """Get port assignments for a worktree"""
+        if repo_alias in self.metadata and worktree_name in self.metadata[repo_alias]:
+            return self.metadata[repo_alias][worktree_name].get('ports')
+        return None
+
+    def list_all_worktrees(self, repo_alias: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
+        """List all worktrees, optionally filtered by repo"""
+        if repo_alias:
+            return {repo_alias: self.metadata.get(repo_alias, {})}
+        return self.metadata
+
+
 class SetupExecutor:
     """Executes setup steps based on configuration"""
 
@@ -186,6 +268,9 @@ class SetupExecutor:
             self._npm_install(step.get("path", "."))
         elif step_type == "command":
             self._run_custom_command(step.get("command"), step.get("cwd"))
+        elif step_type == "docker_compose_override":
+            # This will be handled externally by WorktreeManager
+            return
         else:
             print(f"{self.colors.YELLOW}⚠ Unknown step type: {step_type}{self.colors.END}")
             return
@@ -242,12 +327,126 @@ class SetupExecutor:
         work_dir = self.worktree_path / cwd if cwd else self.worktree_path
         self._run_command([command], cwd=work_dir, shell=True)
 
+    def _generate_docker_compose_override(self, worktree_name: str, port_offset: int, config: Dict[str, Any]):
+        """Generate Docker Compose override file for worktree"""
+        services_config = config.get('services', {})
+        compose_dir = config.get('compose_dir', 'deployment/docker_compose')
+
+        compose_path = self.worktree_path / compose_dir
+        if not compose_path.exists():
+            print(f"{self.colors.YELLOW}  Docker compose directory not found: {compose_path}{self.colors.END}")
+            return None
+
+        # Calculate ports for each service
+        ports_map = {}
+        services_override = {}
+
+        for service_name, service_config in services_config.items():
+            internal_port = service_config.get('internal')
+            if internal_port:
+                external_port = internal_port + port_offset
+                ports_map[service_name] = external_port
+
+                # Build service override
+                service_override = {
+                    'container_name': f"{service_name}-{worktree_name}",
+                    'ports': [f"{external_port}:{internal_port}"]
+                }
+
+                # Add environment overrides if specified
+                env_overrides = service_config.get('environment', {})
+                if env_overrides:
+                    service_override['environment'] = env_overrides
+
+                # Handle volume renaming for data isolation
+                if service_name in ['relational_db', 'cache', 'index', 'minio']:
+                    volumes = service_config.get('volumes', [])
+                    renamed_volumes = []
+                    for vol in volumes:
+                        if ':' in vol:
+                            vol_name, mount_point = vol.split(':', 1)
+                            renamed_vol_name = f"{vol_name}-{worktree_name}"
+                            renamed_volumes.append(f"{renamed_vol_name}:{mount_point}")
+                        else:
+                            renamed_volumes.append(vol)
+                    if renamed_volumes:
+                        service_override['volumes'] = renamed_volumes
+
+                services_override[service_name] = service_override
+
+        # Create the override file content
+        override_content = {
+            'name': f'onyx-{worktree_name}',
+            'services': services_override
+        }
+
+        # Add volume definitions for renamed volumes
+        volumes_def = {}
+        for service_name, service_config in services_config.items():
+            if service_name in ['relational_db', 'cache', 'index', 'minio']:
+                volumes = service_config.get('volumes', [])
+                for vol in volumes:
+                    if ':' in vol:
+                        vol_name = vol.split(':', 1)[0]
+                        renamed_vol_name = f"{vol_name}-{worktree_name}"
+                        volumes_def[renamed_vol_name] = {}
+
+        if volumes_def:
+            override_content['volumes'] = volumes_def
+
+        # Write the override file
+        override_file = compose_path / f'docker-compose.worktree-{worktree_name}.yml'
+
+        import yaml
+        try:
+            with open(override_file, 'w') as f:
+                yaml.dump(override_content, f, default_flow_style=False, sort_keys=False)
+        except ImportError:
+            # Fallback: write as JSON-like YAML manually
+            self._write_yaml_manually(override_file, override_content)
+
+        return ports_map
+
+    def _write_yaml_manually(self, filepath: Path, data: Dict[str, Any]):
+        """Write YAML file manually without PyYAML dependency"""
+        with open(filepath, 'w') as f:
+            f.write(f"# Auto-generated Docker Compose override\n")
+            f.write(f"# Worktree: {filepath.stem.replace('docker-compose.worktree-', '')}\n\n")
+
+            if 'name' in data:
+                f.write(f"name: {data['name']}\n\n")
+
+            if 'services' in data:
+                f.write("services:\n")
+                for service_name, service_config in data['services'].items():
+                    f.write(f"  {service_name}:\n")
+                    if 'container_name' in service_config:
+                        f.write(f"    container_name: {service_config['container_name']}\n")
+                    if 'ports' in service_config:
+                        f.write(f"    ports:\n")
+                        for port in service_config['ports']:
+                            f.write(f"      - \"{port}\"\n")
+                    if 'environment' in service_config:
+                        f.write(f"    environment:\n")
+                        for key, value in service_config['environment'].items():
+                            f.write(f"      - {key}={value}\n")
+                    if 'volumes' in service_config:
+                        f.write(f"    volumes:\n")
+                        for vol in service_config['volumes']:
+                            f.write(f"      - {vol}\n")
+
+            if 'volumes' in data:
+                f.write("\nvolumes:\n")
+                for vol_name in data['volumes'].keys():
+                    f.write(f"  {vol_name}:\n")
+
 
 class WorktreeManager:
     """Manages git worktrees with optional setup configuration"""
 
-    def __init__(self, repo_path: Path):
+    def __init__(self, repo_path: Path, repo_alias: Optional[str] = None):
         self.main_repo = repo_path
+        self.repo_alias = repo_alias or repo_path.name
 
         # Verify it's a git repository
         if not (self.main_repo / ".git").exists():
@@ -264,6 +463,9 @@ class WorktreeManager:
         # Create worktrees directory: <parent>/<repo-name>-worktrees/
         repo_name = self.main_repo.name
         self.worktree_base = self.main_repo.parent / f"{repo_name}-worktrees"
+
+        # Initialize metadata tracker
+        self.metadata = WorktreeMetadata()
 
     def _load_setup_config(self) -> Optional[Dict]:
         """Load setup configuration if it exists"""
@@ -357,8 +559,28 @@ class WorktreeManager:
         ])
         self._print_success(f"Worktree created at {worktree_path}")
 
+        # Handle Docker Compose configuration if present
+        docker_config = None
+        ports_map = None
+
         if not skip_setup:
             setup_config = self._load_setup_config()
+
+            # Check for Docker Compose configuration
+            if setup_config and "docker_compose" in setup_config:
+                docker_config = setup_config["docker_compose"]
+                port_offset = self.metadata.get_next_port_offset(self.repo_alias)
+
+                self._print_step("Generating Docker Compose override")
+                executor = SetupExecutor(worktree_path, Colors)
+                ports_map = executor._generate_docker_compose_override(name, port_offset, docker_config)
+
+                if ports_map:
+                    self._print_success("Docker Compose override generated")
+                    # Save metadata
+                    self.metadata.add_worktree(self.repo_alias, name, port_offset, ports_map)
+
+            # Run other setup steps
             if setup_config and "setup_steps" in setup_config:
                 print(f"\n{Colors.BOLD}Running setup steps...{Colors.END}\n")
                 executor = SetupExecutor(worktree_path, Colors)
@@ -371,6 +593,12 @@ class WorktreeManager:
                         print(f"{Colors.YELLOW}Continuing with remaining steps...{Colors.END}")
 
         print(f"\n{Colors.GREEN}{Colors.BOLD}✓ Worktree '{name}' is ready!{Colors.END}")
+
+        # Show port information if Docker Compose was configured
+        if ports_map:
+            print(f"\n{Colors.BOLD}Service Ports:{Colors.END}")
+            for service, port in sorted(ports_map.items()):
+                print(f"  {service}: {port}")
 
     def remove_worktree(self, name: str, force: bool = False):
         """Remove a worktree and clean up its branch"""
@@ -400,6 +628,9 @@ class WorktreeManager:
                 self._print_success(f"Branch '{branch_name}' deleted")
             except subprocess.CalledProcessError:
                 self._print_warning(f"Could not delete branch '{branch_name}' (may already be deleted)")
+
+        # Clean up metadata
+        self.metadata.remove_worktree(self.repo_alias, name)
 
         print(f"\n{Colors.GREEN}✓ Worktree '{name}' removed successfully{Colors.END}")
 
@@ -452,6 +683,226 @@ class WorktreeManager:
             print(f"    Path: {worktree_path}")
             print()
 
+    def _detect_current_worktree(self) -> Optional[tuple[str, Path]]:
+        """Detect if we're currently in a worktree and return (name, path)"""
+        cwd = Path.cwd()
+
+        # Check if current directory is in a worktree
+        existing_worktrees = self._get_existing_worktrees()
+        for name, branch in existing_worktrees.items():
+            worktree_path = self._get_worktree_path(name)
+            try:
+                # Check if cwd is the worktree or a subdirectory of it
+                cwd.relative_to(worktree_path)
+                return name, worktree_path
+            except ValueError:
+                continue
+
+        return None
+
+    def _get_docker_compose_files(self, name: Optional[str] = None) -> tuple[Optional[Path], Optional[Path], Optional[str], Optional[str]]:
+        """Get Docker Compose file paths for a worktree
+
+        If name is None, tries to detect from current directory
+        Returns: (base_file, override_file, compose_dir, worktree_name)
+        """
+        if name is None:
+            # Try to detect from current directory
+            result = self._detect_current_worktree()
+            if result is None:
+                return None, None, None, None
+            name, worktree_path = result
+        else:
+            worktree_path = self._get_worktree_path(name)
+
+        # Load setup config to find compose directory
+        setup_config = self._load_setup_config()
+        if not setup_config or "docker_compose" not in setup_config:
+            return None, None, None, None
+
+        compose_dir = setup_config["docker_compose"].get("compose_dir", "deployment/docker_compose")
+        compose_path = worktree_path / compose_dir
+
+        if not compose_path.exists():
+            return None, None, None, None
+
+        base_file = compose_path / "docker-compose.yml"
+        override_file = compose_path / f"docker-compose.worktree-{name}.yml"
+
+        if not base_file.exists():
+            return None, None, None, None
+
+        if not override_file.exists():
+            return None, None, None, None
+
+        return base_file, override_file, str(compose_path), name
+
+    def start_services(self, services: Optional[List[str]] = None, build: bool = False):
+        """Start Docker Compose services in current worktree"""
+        base_file, override_file, compose_dir, name = self._get_docker_compose_files()
+
+        if not base_file or not override_file or not name:
+            print(f"{Colors.RED}Error: Docker Compose service management not available{Colors.END}")
+            print(f"\n{Colors.BOLD}This worktree is not configured for Docker Compose service management.{Colors.END}")
+            print(f"\nTo use service management commands:")
+            print(f"  1. Add 'docker_compose' configuration to .worktree-setup.json")
+            print(f"  2. Ensure you're running this command from within a worktree directory")
+            print(f"\nSee DOCKER.md for configuration details.")
+            sys.exit(1)
+
+        self._print_step(f"Starting services for worktree '{name}'")
+
+        cmd = [
+            "docker-compose",
+            "-f", str(base_file),
+            "-f", str(override_file),
+            "up", "-d"
+        ]
+
+        if build:
+            cmd.append("--build")
+
+        if services:
+            cmd.extend(services)
+
+        self._run_command(cmd, cwd=Path(compose_dir))
+        self._print_success("Services started")
+
+        # Show port information
+        ports = self.metadata.get_worktree_ports(self.repo_alias, name)
+        if ports:
+            print(f"\n{Colors.BOLD}Service Ports:{Colors.END}")
+            for svc, port in sorted(ports.items()):
+                print(f"  {svc}: http://localhost:{port}")
+
+    def stop_services(self, services: Optional[List[str]] = None, remove_volumes: bool = False):
+        """Stop Docker Compose services in current worktree"""
+        base_file, override_file, compose_dir, name = self._get_docker_compose_files()
+
+        if not base_file or not override_file or not name:
+            print(f"{Colors.RED}Error: Docker Compose service management not available{Colors.END}")
+            print(f"\n{Colors.BOLD}This worktree is not configured for Docker Compose service management.{Colors.END}")
+            print(f"\nTo use service management commands:")
+            print(f"  1. Add 'docker_compose' configuration to .worktree-setup.json")
+            print(f"  2. Ensure you're running this command from within a worktree directory")
+            print(f"\nSee DOCKER.md for configuration details.")
+            sys.exit(1)
+
+        self._print_step(f"Stopping services for worktree '{name}'")
+
+        if services:
+            # Stop specific services
+            cmd = [
+                "docker-compose",
+                "-f", str(base_file),
+                "-f", str(override_file),
+                "stop"
+            ]
+            cmd.extend(services)
+        else:
+            # Stop all services
+            cmd = [
+                "docker-compose",
+                "-f", str(base_file),
+                "-f", str(override_file),
+                "down"
+            ]
+            if remove_volumes:
+                cmd.append("-v")
+
+        self._run_command(cmd, cwd=Path(compose_dir))
+        self._print_success("Services stopped")
+
+    def restart_services(self, services: Optional[List[str]] = None):
+        """Restart Docker Compose services in current worktree"""
+        base_file, override_file, compose_dir, name = self._get_docker_compose_files()
+
+        if not base_file or not override_file or not name:
+            print(f"{Colors.RED}Error: Docker Compose service management not available{Colors.END}")
+            print(f"\n{Colors.BOLD}This worktree is not configured for Docker Compose service management.{Colors.END}")
+            print(f"\nTo use service management commands:")
+            print(f"  1. Add 'docker_compose' configuration to .worktree-setup.json")
+            print(f"  2. Ensure you're running this command from within a worktree directory")
+            print(f"\nSee DOCKER.md for configuration details.")
+            sys.exit(1)
+
+        self._print_step(f"Restarting services for worktree '{name}'")
+
+        cmd = [
+            "docker-compose",
+            "-f", str(base_file),
+            "-f", str(override_file),
+            "restart"
+        ]
+
+        if services:
+            cmd.extend(services)
+
+        self._run_command(cmd, cwd=Path(compose_dir))
+        self._print_success("Services restarted")
+
+    def services_status(self):
+        """Show status of Docker Compose services in current worktree"""
+        base_file, override_file, compose_dir, name = self._get_docker_compose_files()
+
+        if not base_file or not override_file or not name:
+            print(f"{Colors.RED}Error: Docker Compose service management not available{Colors.END}")
+            print(f"\n{Colors.BOLD}This worktree is not configured for Docker Compose service management.{Colors.END}")
+            print(f"\nTo use service management commands:")
+            print(f"  1. Add 'docker_compose' configuration to .worktree-setup.json")
+            print(f"  2. Ensure you're running this command from within a worktree directory")
+            print(f"\nSee DOCKER.md for configuration details.")
+            sys.exit(1)
+
+        print(f"{Colors.BOLD}Service Status for worktree '{name}':{Colors.END}\n")
+
+        cmd = [
+            "docker-compose",
+            "-f", str(base_file),
+            "-f", str(override_file),
+            "ps"
+        ]
+
+        self._run_command(cmd, cwd=Path(compose_dir))
+
+        # Show port information
+        ports = self.metadata.get_worktree_ports(self.repo_alias, name)
+        if ports:
+            print(f"\n{Colors.BOLD}Service Ports:{Colors.END}")
+            for svc, port in sorted(ports.items()):
+                print(f"  {svc}: http://localhost:{port}")
+
+    def services_logs(self, service: Optional[str] = None, follow: bool = False, tail: Optional[str] = None):
+        """Show logs for Docker Compose services in current worktree"""
+        base_file, override_file, compose_dir, name = self._get_docker_compose_files()
+
+        if not base_file or not override_file or not name:
+            print(f"{Colors.RED}Error: Docker Compose service management not available{Colors.END}")
+            print(f"\n{Colors.BOLD}This worktree is not configured for Docker Compose service management.{Colors.END}")
+            print(f"\nTo use service management commands:")
+            print(f"  1. Add 'docker_compose' configuration to .worktree-setup.json")
+            print(f"  2. Ensure you're running this command from within a worktree directory")
+            print(f"\nSee DOCKER.md for configuration details.")
+            sys.exit(1)
+
+        cmd = [
+            "docker-compose",
+            "-f", str(base_file),
+            "-f", str(override_file),
+            "logs"
+        ]
+
+        if follow:
+            cmd.append("-f")
+
+        if tail:
+            cmd.extend(["--tail", tail])
+
+        if service:
+            cmd.append(service)
+
+        self._run_command(cmd, cwd=Path(compose_dir))
+
 
 def main():
     # Check if first argument is a repository alias before argparse
@@ -492,13 +943,40 @@ def main():
         # List command
         wt_subparsers.add_parser("list", help="List all worktrees")
 
+        # Services command
+        services_parser = wt_subparsers.add_parser("services", help="Manage Docker Compose services (run from worktree directory)")
+        services_subparsers = services_parser.add_subparsers(dest="services_command")
+
+        # Start services
+        start_parser = services_subparsers.add_parser("start", help="Start services")
+        start_parser.add_argument("--services", "--svcs", nargs="+", help="Start specific services")
+        start_parser.add_argument("--build", action="store_true", help="Build images before starting")
+
+        # Stop services
+        stop_parser = services_subparsers.add_parser("stop", help="Stop services")
+        stop_parser.add_argument("--services", "--svcs", nargs="+", help="Stop specific services")
+        stop_parser.add_argument("--volumes", "-v", action="store_true", help="Remove volumes (WARNING: deletes all data)")
+
+        # Restart services
+        restart_parser = services_subparsers.add_parser("restart", help="Restart services")
+        restart_parser.add_argument("--services", "--svcs", nargs="+", help="Restart specific services")
+
+        # Status of services
+        services_subparsers.add_parser("status", help="Show service status")
+
+        # Logs command
+        logs_parser = services_subparsers.add_parser("logs", help="View service logs")
+        logs_parser.add_argument("service", nargs="?", help="Specific service to view logs for")
+        logs_parser.add_argument("-f", "--follow", action="store_true", help="Follow log output")
+        logs_parser.add_argument("--tail", help="Number of lines to show from end of logs")
+
         wt_args = wt_parser.parse_args(sys.argv[2:])
 
         if not wt_args.wt_command:
             wt_parser.print_help()
             sys.exit(1)
 
-        manager = WorktreeManager(repo_path)
+        manager = WorktreeManager(repo_path, repo_alias)
 
         if wt_args.wt_command == "new":
             manager.create_worktree(wt_args.name, wt_args.base, wt_args.skip_setup)
@@ -508,6 +986,19 @@ def main():
             manager.select_worktree(wt_args.name, getattr(wt_args, 'shell_mode', False))
         elif wt_args.wt_command == "list":
             manager.list_worktrees()
+        elif wt_args.wt_command == "services":
+            if wt_args.services_command == "start":
+                manager.start_services(wt_args.services, wt_args.build)
+            elif wt_args.services_command == "stop":
+                manager.stop_services(wt_args.services, wt_args.volumes)
+            elif wt_args.services_command == "restart":
+                manager.restart_services(wt_args.services)
+            elif wt_args.services_command == "status":
+                manager.services_status()
+            elif wt_args.services_command == "logs":
+                manager.services_logs(wt_args.service, wt_args.follow, wt_args.tail)
+            else:
+                services_parser.print_help()
         return
 
     # Regular argparse for repo management

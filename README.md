@@ -157,6 +157,66 @@ worktree <repo> rm <name>            # With confirmation
 worktree <repo> rm <name> --force    # Skip confirmation
 ```
 
+### Docker Compose Services (Optional)
+
+If your repository uses Docker Compose, the worktree manager can automatically manage services with unique ports for each worktree. **All service commands must be run from within the worktree directory.**
+
+#### Typical Workflow
+
+```bash
+# 1. Switch to worktree
+worktree onyx select dev1
+
+# 2. Start services
+worktree onyx services start
+
+# 3. View logs
+worktree onyx services logs api_server
+
+# 4. Stop services
+worktree onyx services stop
+```
+
+#### Start Services
+
+```bash
+worktree <repo> services start                     # Start all services
+worktree <repo> services start --build             # Rebuild and start
+worktree <repo> services start --svcs db cache     # Start specific services
+```
+
+#### Stop Services
+
+```bash
+worktree <repo> services stop                      # Stop all services
+worktree <repo> services stop --svcs api_server    # Stop specific services
+worktree <repo> services stop --volumes            # Stop and remove data
+```
+
+#### Restart Services
+
+```bash
+worktree <repo> services restart                   # Restart all services
+worktree <repo> services restart --svcs api_server # Restart specific services
+```
+
+#### Check Status
+
+```bash
+worktree <repo> services status                    # Show running services
+```
+
+#### View Logs
+
+```bash
+worktree <repo> services logs                      # All service logs
+worktree <repo> services logs api_server           # Specific service
+worktree <repo> services logs api_server -f        # Follow logs
+worktree <repo> services logs --tail 100           # Last 100 lines
+```
+
+**See [DOCKER.md](DOCKER.md) for complete Docker Compose documentation.**
+
 ## How It Works
 
 ### Directory Structure

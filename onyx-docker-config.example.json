@@ -1,0 +1,32 @@
+{
+  "compose_dir": "deployment/docker_compose",
+  "services": {
+    "nginx": {
+      "internal": 80,
+      "description": "Main web interface"
+    },
+    "api_server": {
+      "internal": 8080,
+      "description": "Backend API"
+    },
+    "relational_db": {
+      "internal": 5432,
+      "description": "PostgreSQL database",
+      "volumes": ["db_volume"]
+    },
+    "index": {
+      "internal": 19071,
+      "description": "Vespa search (config)",
+      "volumes": ["vespa_volume"]
+    },
+    "cache": {
+      "internal": 6379,
+      "description": "Redis cache"
+    },
+    "minio": {
+      "internal": 9000,
+      "description": "S3 storage (API)",
+      "volumes": ["minio_data"]
+    }
+  }
+}
