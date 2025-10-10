@@ -10,6 +10,8 @@ import json
 import os
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
@@ -22,6 +24,44 @@ class Colors:
     RED = '\033[91m'
     BOLD = '\033[1m'
     END = '\033[0m'
+
+
+class Spinner:
+    """A simple terminal spinner for long-running operations"""
+
+    def __init__(self, message: str = "Loading..."):
+        self.message = message
+        self.spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+        self.running = False
+        self.thread = None
+
+    def _spin(self):
+        """The spinner animation loop"""
+        idx = 0
+        while self.running:
+            char = self.spinner_chars[idx % len(self.spinner_chars)]
+            sys.stdout.write(f'\r{Colors.BLUE}{char}{Colors.END} {self.message}')
+            sys.stdout.flush()
+            time.sleep(0.1)
+            idx += 1
+
+    def start(self):
+        """Start the spinner"""
+        self.running = True
+        self.thread = threading.Thread(target=self._spin)
+        self.thread.daemon = True
+        self.thread.start()
+
+    def stop(self, final_message: Optional[str] = None):
+        """Stop the spinner and optionally print a final message"""
+        self.running = False
+        if self.thread:
+            self.thread.join()
+        # Clear the spinner line
+        sys.stdout.write('\r' + ' ' * (len(self.message) + 10) + '\r')
+        sys.stdout.flush()
+        if final_message:
+            print(final_message)
 
 
 class RepoConfig:
@@ -250,32 +290,40 @@ class SetupExecutor:
         step_type = step.get("type")
         step_name = step.get("name", step_type)
 
-        self._print_step(step_name)
+        # Start spinner for the step
+        spinner = Spinner(step_name)
+        spinner.start()
 
-        if step_type == "python_venv":
-            self._setup_python_venv()
-        elif step_type == "pip_install":
-            self._pip_install(step.get("requirements", []))
-        elif step_type == "pip_install_editable":
-            self._pip_install_editable(step.get("path", "."))
-        elif step_type == "pip_install_package":
-            self._pip_install_package(step.get("package"))
-        elif step_type == "playwright_install":
-            self._playwright_install()
-        elif step_type == "precommit_install":
-            self._precommit_install(step.get("path", "."))
-        elif step_type == "npm_install":
-            self._npm_install(step.get("path", "."))
-        elif step_type == "command":
-            self._run_custom_command(step.get("command"), step.get("cwd"))
-        elif step_type == "docker_compose_override":
-            # This will be handled externally by WorktreeManager
-            return
-        else:
-            print(f"{self.colors.YELLOW}⚠ Unknown step type: {step_type}{self.colors.END}")
-            return
+        try:
+            if step_type == "python_venv":
+                self._setup_python_venv()
+            elif step_type == "pip_install":
+                self._pip_install(step.get("requirements", []))
+            elif step_type == "pip_install_editable":
+                self._pip_install_editable(step.get("path", "."))
+            elif step_type == "pip_install_package":
+                self._pip_install_package(step.get("package"))
+            elif step_type == "playwright_install":
+                self._playwright_install()
+            elif step_type == "precommit_install":
+                self._precommit_install(step.get("path", "."))
+            elif step_type == "npm_install":
+                self._npm_install(step.get("path", "."))
+            elif step_type == "command":
+                self._run_custom_command(step.get("command"), step.get("cwd"))
+            elif step_type == "docker_compose_override":
+                # This will be handled externally by WorktreeManager
+                spinner.stop()
+                return
+            else:
+                spinner.stop()
+                print(f"{self.colors.YELLOW}⚠ Unknown step type: {step_type}{self.colors.END}")
+                return
 
-        self._print_success(f"{step_name} complete")
+            spinner.stop(f"{self.colors.GREEN}✓{self.colors.END} {step_name} complete")
+        except Exception as e:
+            spinner.stop()
+            raise
 
     def _setup_python_venv(self):
         """Create Python virtual environment"""
@@ -287,10 +335,8 @@ class SetupExecutor:
         for req_file in requirements:
             req_path = self.worktree_path / req_file
             if req_path.exists():
-                print(f"  Installing from {req_file}...")
                 self._run_command([str(pip_path), "install", "-r", str(req_path)])
-            else:
-                print(f"{self.colors.YELLOW}  Skipping {req_file} (not found){self.colors.END}")
+            # Skip silently if file doesn't exist - error will be caught by caller
 
     def _pip_install_editable(self, path: str):
         """Install package in editable mode"""
@@ -319,8 +365,7 @@ class SetupExecutor:
         install_path = self.worktree_path / path
         if install_path.exists():
             self._run_command(["npm", "install"], cwd=install_path)
-        else:
-            print(f"{self.colors.YELLOW}  Skipping npm install (path not found: {path}){self.colors.END}")
+        # Skip silently if path doesn't exist - error will be caught by caller
 
     def _run_custom_command(self, command: str, cwd: Optional[str] = None):
         """Run a custom shell command"""
@@ -553,11 +598,17 @@ class WorktreeManager:
 
         self.worktree_base.mkdir(exist_ok=True)
 
-        self._print_step(f"Creating worktree '{name}' from {base_branch}")
-        self._run_command([
-            "git", "worktree", "add", "-b", name, str(worktree_path), base_branch
-        ])
-        self._print_success(f"Worktree created at {worktree_path}")
+        # Create worktree with spinner
+        spinner = Spinner(f"Creating worktree '{name}' from {base_branch}")
+        spinner.start()
+        try:
+            self._run_command([
+                "git", "worktree", "add", "-b", name, str(worktree_path), base_branch
+            ])
+            spinner.stop(f"{Colors.GREEN}✓{Colors.END} Worktree created at {worktree_path}")
+        except Exception as e:
+            spinner.stop()
+            raise
 
         # Handle Docker Compose configuration if present
         docker_config = None
@@ -615,18 +666,26 @@ class WorktreeManager:
                 print("Cancelled.")
                 return
 
-        self._print_step(f"Removing worktree '{name}'")
-        force_flag = ["--force"] if force else []
-        self._run_command(["git", "worktree", "remove", *force_flag, str(worktree_path)])
-        self._print_success(f"Worktree removed: {worktree_path}")
+        # Remove worktree with spinner
+        spinner = Spinner(f"Removing worktree '{name}'")
+        spinner.start()
+        try:
+            force_flag = ["--force"] if force else []
+            self._run_command(["git", "worktree", "remove", *force_flag, str(worktree_path)])
+            spinner.stop(f"{Colors.GREEN}✓{Colors.END} Worktree removed: {worktree_path}")
+        except Exception as e:
+            spinner.stop()
+            raise
 
         branch_name = existing_worktrees[name]
         if branch_name != 'detached':
             try:
-                self._print_step(f"Deleting branch '{branch_name}'")
+                spinner = Spinner(f"Deleting branch '{branch_name}'")
+                spinner.start()
                 self._run_command(["git", "branch", "-D", branch_name], check=False)
-                self._print_success(f"Branch '{branch_name}' deleted")
+                spinner.stop(f"{Colors.GREEN}✓{Colors.END} Branch '{branch_name}' deleted")
             except subprocess.CalledProcessError:
+                spinner.stop()
                 self._print_warning(f"Could not delete branch '{branch_name}' (may already be deleted)")
 
         # Clean up metadata
@@ -750,23 +809,29 @@ class WorktreeManager:
             print(f"\nSee DOCKER.md for configuration details.")
             sys.exit(1)
 
-        self._print_step(f"Starting services for worktree '{name}'")
+        # Start services with spinner
+        spinner = Spinner(f"Starting services for worktree '{name}'")
+        spinner.start()
 
-        cmd = [
-            "docker-compose",
-            "-f", str(base_file),
-            "-f", str(override_file),
-            "up", "-d"
-        ]
+        try:
+            cmd = [
+                "docker-compose",
+                "-f", str(base_file),
+                "-f", str(override_file),
+                "up", "-d"
+            ]
 
-        if build:
-            cmd.append("--build")
+            if build:
+                cmd.append("--build")
 
-        if services:
-            cmd.extend(services)
+            if services:
+                cmd.extend(services)
 
-        self._run_command(cmd, cwd=Path(compose_dir))
-        self._print_success("Services started")
+            self._run_command(cmd, cwd=Path(compose_dir))
+            spinner.stop(f"{Colors.GREEN}✓{Colors.END} Services started")
+        except Exception as e:
+            spinner.stop()
+            raise
 
         # Show port information
         ports = self.metadata.get_worktree_ports(self.repo_alias, name)
@@ -788,30 +853,36 @@ class WorktreeManager:
             print(f"\nSee DOCKER.md for configuration details.")
             sys.exit(1)
 
-        self._print_step(f"Stopping services for worktree '{name}'")
+        # Stop services with spinner
+        spinner = Spinner(f"Stopping services for worktree '{name}'")
+        spinner.start()
 
-        if services:
-            # Stop specific services
-            cmd = [
-                "docker-compose",
-                "-f", str(base_file),
-                "-f", str(override_file),
-                "stop"
-            ]
-            cmd.extend(services)
-        else:
-            # Stop all services
-            cmd = [
-                "docker-compose",
-                "-f", str(base_file),
-                "-f", str(override_file),
-                "down"
-            ]
-            if remove_volumes:
-                cmd.append("-v")
+        try:
+            if services:
+                # Stop specific services
+                cmd = [
+                    "docker-compose",
+                    "-f", str(base_file),
+                    "-f", str(override_file),
+                    "stop"
+                ]
+                cmd.extend(services)
+            else:
+                # Stop all services
+                cmd = [
+                    "docker-compose",
+                    "-f", str(base_file),
+                    "-f", str(override_file),
+                    "down"
+                ]
+                if remove_volumes:
+                    cmd.append("-v")
 
-        self._run_command(cmd, cwd=Path(compose_dir))
-        self._print_success("Services stopped")
+            self._run_command(cmd, cwd=Path(compose_dir))
+            spinner.stop(f"{Colors.GREEN}✓{Colors.END} Services stopped")
+        except Exception as e:
+            spinner.stop()
+            raise
 
     def restart_services(self, services: Optional[List[str]] = None):
         """Restart Docker Compose services in current worktree"""
@@ -826,20 +897,26 @@ class WorktreeManager:
             print(f"\nSee DOCKER.md for configuration details.")
             sys.exit(1)
 
-        self._print_step(f"Restarting services for worktree '{name}'")
+        # Restart services with spinner
+        spinner = Spinner(f"Restarting services for worktree '{name}'")
+        spinner.start()
 
-        cmd = [
-            "docker-compose",
-            "-f", str(base_file),
-            "-f", str(override_file),
-            "restart"
-        ]
+        try:
+            cmd = [
+                "docker-compose",
+                "-f", str(base_file),
+                "-f", str(override_file),
+                "restart"
+            ]
 
-        if services:
-            cmd.extend(services)
+            if services:
+                cmd.extend(services)
 
-        self._run_command(cmd, cwd=Path(compose_dir))
-        self._print_success("Services restarted")
+            self._run_command(cmd, cwd=Path(compose_dir))
+            spinner.stop(f"{Colors.GREEN}✓{Colors.END} Services restarted")
+        except Exception as e:
+            spinner.stop()
+            raise
 
     def services_status(self):
         """Show status of Docker Compose services in current worktree"""
