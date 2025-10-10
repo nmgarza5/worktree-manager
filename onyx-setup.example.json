@@ -1,0 +1,42 @@
+{
+  "setup_steps": [
+    {
+      "name": "Python virtual environment",
+      "type": "python_venv"
+    },
+    {
+      "name": "Python dependencies",
+      "type": "pip_install",
+      "requirements": [
+        "backend/requirements/default.txt",
+        "backend/requirements/dev.txt",
+        "backend/requirements/ee.txt",
+        "backend/requirements/model_server.txt"
+      ]
+    },
+    {
+      "name": "Editable package install",
+      "type": "pip_install_editable",
+      "path": "."
+    },
+    {
+      "name": "Pre-commit",
+      "type": "pip_install_package",
+      "package": "pre-commit"
+    },
+    {
+      "name": "Playwright",
+      "type": "playwright_install"
+    },
+    {
+      "name": "Pre-commit hooks",
+      "type": "precommit_install",
+      "path": "backend"
+    },
+    {
+      "name": "Node dependencies",
+      "type": "npm_install",
+      "path": "web"
+    }
+  ]
+}
