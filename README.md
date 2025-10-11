@@ -295,6 +295,15 @@ This tool was built for the [Onyx](https://github.com/danswer-ai/danswer) open-s
 
 The configuration enables running multiple Onyx worktrees simultaneously with isolated services on different ports.
 
+**Important:** Add these lines to your repository's `.gitignore`:
+```gitignore
+# worktree manager
+.worktree-setup.json
+deployment/docker_compose/docker-compose.worktree-*.yml
+```
+
+This prevents committing the setup configuration and generated Docker Compose override files.
+
 ### Available Setup Steps
 
 **Python:**
