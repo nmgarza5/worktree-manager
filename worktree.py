@@ -838,7 +838,7 @@ class WorktreeManager:
 
         try:
             cmd = [
-                "docker-compose",
+                "docker", "compose",
                 "-f", str(base_file),
                 "-f", str(override_file),
                 "up", "-d"
@@ -888,7 +888,7 @@ class WorktreeManager:
             if services:
                 # Stop specific services
                 cmd = [
-                    "docker-compose",
+                    "docker", "compose",
                     "-f", str(base_file),
                     "-f", str(override_file),
                     "stop"
@@ -897,7 +897,7 @@ class WorktreeManager:
             else:
                 # Stop all services
                 cmd = [
-                    "docker-compose",
+                    "docker", "compose",
                     "-f", str(base_file),
                     "-f", str(override_file),
                     "down"
@@ -934,7 +934,7 @@ class WorktreeManager:
 
         try:
             cmd = [
-                "docker-compose",
+                "docker", "compose",
                 "-f", str(base_file),
                 "-f", str(override_file),
                 "restart"
@@ -969,7 +969,7 @@ class WorktreeManager:
         print(f"{Colors.BOLD}Service Status for worktree '{name}':{Colors.END}\n")
 
         cmd = [
-            "docker-compose",
+            "docker", "compose",
             "-f", str(base_file),
             "-f", str(override_file),
             "ps"
@@ -998,7 +998,7 @@ class WorktreeManager:
             sys.exit(1)
 
         cmd = [
-            "docker-compose",
+            "docker", "compose",
             "-f", str(base_file),
             "-f", str(override_file),
             "logs"
