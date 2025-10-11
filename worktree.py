@@ -324,6 +324,10 @@ class SetupExecutor:
                 return
 
             spinner.stop(f"{self.colors.GREEN}✓{self.colors.END} {step_name} complete")
+        except subprocess.CalledProcessError:
+            spinner.stop()
+            # Error already printed by _run_command
+            raise
         except Exception as e:
             spinner.stop()
             raise
@@ -609,6 +613,10 @@ class WorktreeManager:
                 "git", "worktree", "add", "-b", name, str(worktree_path), base_branch
             ])
             spinner.stop(f"{Colors.GREEN}✓{Colors.END} Worktree created at {worktree_path}")
+        except subprocess.CalledProcessError:
+            spinner.stop()
+            # Error already printed by _run_command
+            sys.exit(1)
         except Exception as e:
             spinner.stop()
             raise
@@ -676,6 +684,18 @@ class WorktreeManager:
             force_flag = ["--force"] if force else []
             self._run_command(["git", "worktree", "remove", *force_flag, str(worktree_path)])
             spinner.stop(f"{Colors.GREEN}✓{Colors.END} Worktree removed: {worktree_path}")
+        except subprocess.CalledProcessError as e:
+            spinner.stop()
+            # Check if it's the "contains modified files" error
+            if "contains modified or untracked files" in (e.stderr or ""):
+                print(f"\n{Colors.RED}Error: Worktree '{name}' contains uncommitted changes{Colors.END}")
+                print(f"\n{Colors.YELLOW}Options:{Colors.END}")
+                print(f"  1. Commit or stash your changes")
+                print(f"  2. Use --force to delete anyway: {Colors.BOLD}worktree {self.repo_alias} rm {name} --force{Colors.END}")
+            else:
+                # Re-raise for other errors
+                raise
+            sys.exit(1)
         except Exception as e:
             spinner.stop()
             raise
@@ -832,6 +852,10 @@ class WorktreeManager:
 
             self._run_command(cmd, cwd=Path(compose_dir))
             spinner.stop(f"{Colors.GREEN}✓{Colors.END} Services started")
+        except subprocess.CalledProcessError:
+            spinner.stop()
+            # Error already printed by _run_command
+            sys.exit(1)
         except Exception as e:
             spinner.stop()
             raise
@@ -883,6 +907,10 @@ class WorktreeManager:
 
             self._run_command(cmd, cwd=Path(compose_dir))
             spinner.stop(f"{Colors.GREEN}✓{Colors.END} Services stopped")
+        except subprocess.CalledProcessError:
+            spinner.stop()
+            # Error already printed by _run_command
+            sys.exit(1)
         except Exception as e:
             spinner.stop()
             raise
@@ -917,6 +945,10 @@ class WorktreeManager:
 
             self._run_command(cmd, cwd=Path(compose_dir))
             spinner.stop(f"{Colors.GREEN}✓{Colors.END} Services restarted")
+        except subprocess.CalledProcessError:
+            spinner.stop()
+            # Error already printed by _run_command
+            sys.exit(1)
         except Exception as e:
             spinner.stop()
             raise
