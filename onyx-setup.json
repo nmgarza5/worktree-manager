@@ -13,12 +13,12 @@
       "relational_db": {
         "internal": 5432,
         "description": "PostgreSQL database",
-        "volumes": ["db_volume"]
+        "isolate_data": true
       },
       "index": {
         "internal": 19071,
         "description": "Vespa search engine",
-        "volumes": ["vespa_volume"]
+        "isolate_data": true
       },
       "cache": {
         "internal": 6379,
@@ -27,7 +27,7 @@
       "minio": {
         "internal": 9000,
         "description": "S3-compatible storage",
-        "volumes": ["minio_data"]
+        "isolate_data": true
       }
     }
   },

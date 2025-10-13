@@ -171,24 +171,70 @@ class WorktreeMetadata:
         with open(self.metadata_file, 'w') as f:
             json.dump(self.metadata, f, indent=2)
 
-    def get_next_port_offset(self, repo_alias: str) -> int:
-        """Get the next available port offset for a repository"""
-        if repo_alias not in self.metadata:
-            return 0
+    def _is_port_available(self, port: int) -> bool:
+        """Check if a port is available on the system"""
+        import socket
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind(('0.0.0.0', port))
+                return True
+        except OSError:
+            return False
 
-        used_offsets = [
-            wt_data.get('port_offset', 0)
-            for wt_data in self.metadata[repo_alias].values()
-        ]
+    def get_next_port_offset(self, repo_alias: str, services_config: Dict[str, Any]) -> int:
+        """Get the next available port offset for a repository
 
-        if not used_offsets:
+        Checks both metadata and actual port availability to avoid conflicts.
+        """
+        used_offsets = []
+
+        if repo_alias in self.metadata:
+            used_offsets = [
+                wt_data.get('port_offset', 0)
+                for wt_data in self.metadata[repo_alias].values()
+            ]
+
+        # Extract base ports from services config
+        base_ports = []
+        for service_name, service_config in services_config.items():
+            internal_port = service_config.get('internal')
+            if internal_port:
+                base_ports.append(internal_port)
+
+        if not base_ports:
             return 0
 
         # Find next available offset (increment by 10)
+        # Check both metadata and actual port availability
         next_offset = 0
-        while next_offset in used_offsets:
-            next_offset += 10
+        max_attempts = 100  # Prevent infinite loop
+        attempts = 0
 
+        while attempts < max_attempts:
+            # Check if this offset is already used in metadata
+            if next_offset in used_offsets:
+                next_offset += 10
+                attempts += 1
+                continue
+
+            # Check if all ports with this offset are actually available
+            all_ports_available = True
+            for base_port in base_ports:
+                test_port = base_port + next_offset
+                if not self._is_port_available(test_port):
+                    all_ports_available = False
+                    break
+
+            if all_ports_available:
+                return next_offset
+
+            # If any port is not available, try next offset
+            next_offset += 10
+            attempts += 1
+
+        # If we couldn't find an available offset, warn and return a high offset
+        print(f"{Colors.YELLOW}⚠ Warning: Could not find available ports after {max_attempts} attempts. Using offset {next_offset}{Colors.END}")
         return next_offset
 
     def add_worktree(self, repo_alias: str, worktree_name: str, port_offset: int, ports: Dict[str, int]):
@@ -389,6 +435,22 @@ class SetupExecutor:
             print(f"{self.colors.YELLOW}  Docker compose directory not found: {compose_path}{self.colors.END}")
             return None
 
+        # Load base docker-compose.yml to extract volume configurations
+        base_compose_file = compose_path / 'docker-compose.yml'
+        base_services = {}
+
+        if base_compose_file.exists():
+            try:
+                import yaml
+                with open(base_compose_file, 'r') as f:
+                    base_compose = yaml.safe_load(f)
+                    base_services = base_compose.get('services', {})
+            except ImportError:
+                # If PyYAML is not available, parse manually (basic support)
+                base_services = self._parse_yaml_manually(base_compose_file)
+            except Exception as e:
+                print(f"{self.colors.YELLOW}⚠ Warning: Could not parse base docker-compose.yml: {e}{self.colors.END}")
+
         # Calculate ports for each service
         ports_map = {}
         services_override = {}
@@ -411,18 +473,29 @@ class SetupExecutor:
                     service_override['environment'] = env_overrides
 
                 # Handle volume renaming for data isolation
-                if service_name in ['relational_db', 'cache', 'index', 'minio']:
-                    volumes = service_config.get('volumes', [])
-                    renamed_volumes = []
-                    for vol in volumes:
-                        if ':' in vol:
-                            vol_name, mount_point = vol.split(':', 1)
-                            renamed_vol_name = f"{vol_name}-{worktree_name}"
-                            renamed_volumes.append(f"{renamed_vol_name}:{mount_point}")
-                        else:
-                            renamed_volumes.append(vol)
-                    if renamed_volumes:
-                        service_override['volumes'] = renamed_volumes
+                if service_config.get('isolate_data', False):
+                    # Get volume configuration from base docker-compose.yml
+                    base_service = base_services.get(service_name, {})
+                    base_volumes = base_service.get('volumes', [])
+
+                    if base_volumes:
+                        renamed_volumes = []
+                        for vol in base_volumes:
+                            # Parse volume spec: volume_name:mount_path[:options]
+                            if isinstance(vol, str) and ':' in vol:
+                                parts = vol.split(':', 1)
+                                vol_name = parts[0]
+                                mount_spec = parts[1] if len(parts) > 1 else ''
+
+                                # Rename the volume while preserving mount path
+                                renamed_vol_name = f"{vol_name}-{worktree_name}"
+                                renamed_volumes.append(f"{renamed_vol_name}:{mount_spec}")
+                            else:
+                                # Keep non-named volumes as-is
+                                renamed_volumes.append(vol)
+
+                        if renamed_volumes:
+                            service_override['volumes'] = renamed_volumes
 
                 services_override[service_name] = service_override
 
@@ -435,13 +508,18 @@ class SetupExecutor:
         # Add volume definitions for renamed volumes
         volumes_def = {}
         for service_name, service_config in services_config.items():
-            if service_name in ['relational_db', 'cache', 'index', 'minio']:
-                volumes = service_config.get('volumes', [])
-                for vol in volumes:
-                    if ':' in vol:
+            if service_config.get('isolate_data', False):
+                # Get volume configuration from base docker-compose.yml
+                base_service = base_services.get(service_name, {})
+                base_volumes = base_service.get('volumes', [])
+
+                for vol in base_volumes:
+                    if isinstance(vol, str) and ':' in vol:
                         vol_name = vol.split(':', 1)[0]
-                        renamed_vol_name = f"{vol_name}-{worktree_name}"
-                        volumes_def[renamed_vol_name] = {}
+                        # Only include named volumes (not bind mounts starting with . or /)
+                        if not vol_name.startswith('.') and not vol_name.startswith('/'):
+                            renamed_vol_name = f"{vol_name}-{worktree_name}"
+                            volumes_def[renamed_vol_name] = {}
 
         if volumes_def:
             override_content['volumes'] = volumes_def
@@ -458,6 +536,49 @@ class SetupExecutor:
             self._write_yaml_manually(override_file, override_content)
 
         return ports_map
+
+    def _parse_yaml_manually(self, filepath: Path) -> Dict[str, Any]:
+        """Basic YAML parser for docker-compose.yml files (fallback when PyYAML unavailable)"""
+        services = {}
+        current_service = None
+        in_volumes = False
+
+        try:
+            with open(filepath, 'r') as f:
+                for line in f:
+                    stripped = line.strip()
+
+                    # Skip comments and empty lines
+                    if not stripped or stripped.startswith('#'):
+                        continue
+
+                    # Check if we're in services section
+                    if stripped == 'services:':
+                        in_volumes = False
+                        continue
+
+                    # Service definition (2 spaces indent)
+                    if line.startswith('  ') and not line.startswith('    ') and ':' in stripped:
+                        service_name = stripped.rstrip(':')
+                        current_service = service_name
+                        services[service_name] = {'volumes': []}
+                        in_volumes = False
+                        continue
+
+                    # Volumes section within a service
+                    if current_service and stripped == 'volumes:':
+                        in_volumes = True
+                        continue
+
+                    # Volume entry (6 spaces indent)
+                    if in_volumes and line.startswith('      - '):
+                        vol_spec = stripped[2:]  # Remove '- ' prefix
+                        services[current_service]['volumes'].append(vol_spec)
+
+        except Exception as e:
+            print(f"{Colors.YELLOW}⚠ Warning: Manual YAML parsing failed: {e}{Colors.END}")
+
+        return services
 
     def _write_yaml_manually(self, filepath: Path, data: Dict[str, Any]):
         """Write YAML file manually without PyYAML dependency"""
@@ -631,7 +752,8 @@ class WorktreeManager:
             # Check for Docker Compose configuration
             if setup_config and "docker_compose" in setup_config:
                 docker_config = setup_config["docker_compose"]
-                port_offset = self.metadata.get_next_port_offset(self.repo_alias)
+                services_config = docker_config.get('services', {})
+                port_offset = self.metadata.get_next_port_offset(self.repo_alias, services_config)
 
                 self._print_step("Generating Docker Compose override")
                 executor = SetupExecutor(worktree_path, Colors)
