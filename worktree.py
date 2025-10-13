@@ -202,6 +202,10 @@ class WorktreeMetadata:
             if internal_port:
                 base_ports.append(internal_port)
 
+            # Also check additional ports (e.g., nginx has both 80 and 3000)
+            additional_ports = service_config.get('additional_ports', [])
+            base_ports.extend(additional_ports)
+
         if not base_ports:
             return 0
 
@@ -461,10 +465,19 @@ class SetupExecutor:
                 external_port = internal_port + port_offset
                 ports_map[service_name] = external_port
 
+                # Build port mappings list
+                port_mappings = [f"{external_port}:{internal_port}"]
+
+                # Add additional port mappings (e.g., nginx has both 80 and 3000)
+                additional_ports = service_config.get('additional_ports', [])
+                for add_port in additional_ports:
+                    add_external = add_port + port_offset
+                    port_mappings.append(f"{add_external}:{internal_port}")
+
                 # Build service override
                 service_override = {
                     'container_name': f"{service_name}-{worktree_name}",
-                    'ports': [f"{external_port}:{internal_port}"]
+                    'ports': port_mappings
                 }
 
                 # Add environment overrides if specified
