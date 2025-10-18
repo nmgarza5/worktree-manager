@@ -15,6 +15,12 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
+try:
+    import yaml
+    HAS_YAML = True
+except ImportError:
+    HAS_YAML = False
+
 
 class Colors:
     """ANSI color codes for terminal output"""
@@ -23,6 +29,7 @@ class Colors:
     YELLOW = '\033[93m'
     RED = '\033[91m'
     BOLD = '\033[1m'
+    DIM = '\033[2m'
     END = '\033[0m'
 
 
@@ -338,96 +345,123 @@ class SetupExecutor:
             return self.venv_path / "Scripts" / name
         return self.venv_path / "bin" / name
 
-    def execute_step(self, step: Dict[str, Any]):
-        """Execute a single setup step"""
+    def _convert_typed_step_to_command(self, step: Dict[str, Any]) -> Optional[str]:
+        """Convert typed steps (python_venv, pip_install, etc.) to shell commands"""
         step_type = step.get("type")
-        step_name = step.get("name", step_type)
 
-        # Start spinner for the step
-        spinner = Spinner(step_name)
-        spinner.start()
+        if not step_type:
+            return None
+
+        if step_type == "python_venv":
+            return "python3 -m venv .venv"
+
+        elif step_type == "pip_install":
+            requirements = step.get("requirements", [])
+            if not requirements:
+                return None
+            # Activate venv and install requirements
+            req_files = " ".join([f"-r {r}" for r in requirements])
+            return f"source .venv/bin/activate && pip install {req_files}"
+
+        elif step_type == "pip_install_editable":
+            path = step.get("path", ".")
+            return f"source .venv/bin/activate && pip install -e {path}"
+
+        elif step_type == "pip_install_package":
+            package = step.get("package")
+            if not package:
+                return None
+            return f"source .venv/bin/activate && pip install {package}"
+
+        elif step_type == "precommit_install":
+            path = step.get("path", ".")
+            return f"source .venv/bin/activate && cd {path} && pre-commit install"
+
+        elif step_type == "playwright_install":
+            return "source .venv/bin/activate && playwright install"
+
+        elif step_type == "npm_install":
+            path = step.get("path", ".")
+            return f"cd {path} && npm install"
+
+        return None
+
+    def execute_step(self, step: Dict[str, Any], verbose: bool = False):
+        """Execute a single setup step by running the command from the setup file
+
+        This executes arbitrary shell commands defined in the setup configuration.
+        All errors are surfaced to the user so they can debug their commands.
+        """
+        step_name = step.get("name", "Unnamed step")
+        command = step.get("command")
+        cwd = step.get("cwd")
+
+        # If no direct command, try to convert from type
+        if not command:
+            command = self._convert_typed_step_to_command(step)
+
+        if not command:
+            print(f"{self.colors.YELLOW}⚠ Step '{step_name}' has no command to execute{self.colors.END}")
+            return
+
+        # Start spinner for the step (only if not verbose)
+        spinner = None
+        if not verbose:
+            spinner = Spinner(step_name)
+            spinner.start()
+        else:
+            print(f"\n{self.colors.BOLD}Running: {step_name}{self.colors.END}")
+            print(f"{self.colors.DIM}Command: {command}{self.colors.END}")
 
         try:
-            if step_type == "python_venv":
-                self._setup_python_venv()
-            elif step_type == "pip_install":
-                self._pip_install(step.get("requirements", []))
-            elif step_type == "pip_install_editable":
-                self._pip_install_editable(step.get("path", "."))
-            elif step_type == "pip_install_package":
-                self._pip_install_package(step.get("package"))
-            elif step_type == "playwright_install":
-                self._playwright_install()
-            elif step_type == "precommit_install":
-                self._precommit_install(step.get("path", "."))
-            elif step_type == "npm_install":
-                self._npm_install(step.get("path", "."))
-            elif step_type == "command":
-                self._run_custom_command(step.get("command"), step.get("cwd"))
-            elif step_type == "docker_compose_override":
-                # This will be handled externally by WorktreeManager
-                spinner.stop()
-                return
+            # Determine working directory
+            work_dir = self.worktree_path / cwd if cwd else self.worktree_path
+
+            # Execute the command
+            result = subprocess.run(
+                command,
+                cwd=work_dir,
+                shell=True,
+                capture_output=not verbose,  # Stream output if verbose
+                text=True,
+                check=True
+            )
+
+            if spinner:
+                spinner.stop(f"{self.colors.GREEN}✓{self.colors.END} {step_name}")
             else:
+                print(f"{self.colors.GREEN}✓{self.colors.END} {step_name} complete")
+
+        except subprocess.CalledProcessError as e:
+            if spinner:
                 spinner.stop()
-                print(f"{self.colors.YELLOW}⚠ Unknown step type: {step_type}{self.colors.END}")
-                return
+            # Surface all error details to the user
+            print(f"\n{self.colors.RED}✗ Setup step failed: {step_name}{self.colors.END}")
+            print(f"\n{self.colors.BOLD}Command:{self.colors.END}")
+            print(f"  {command}")
+            if cwd:
+                print(f"\n{self.colors.BOLD}Working directory:{self.colors.END}")
+                print(f"  {work_dir}")
+            print(f"\n{self.colors.BOLD}Exit code:{self.colors.END} {e.returncode}")
 
-            spinner.stop(f"{self.colors.GREEN}✓{self.colors.END} {step_name} complete")
-        except subprocess.CalledProcessError:
-            spinner.stop()
-            # Error already printed by _run_command
+            if e.stdout:
+                print(f"\n{self.colors.BOLD}Standard output:{self.colors.END}")
+                print(e.stdout)
+
+            if e.stderr:
+                print(f"\n{self.colors.BOLD}Standard error:{self.colors.END}")
+                print(f"{self.colors.RED}{e.stderr}{self.colors.END}")
+
+            print(f"\n{self.colors.YELLOW}This is a problem with your setup command, not the worktree tool.{self.colors.END}")
+            print(f"{self.colors.YELLOW}Please fix the command in your setup configuration file.{self.colors.END}")
             raise
+
         except Exception as e:
-            spinner.stop()
+            if spinner:
+                spinner.stop()
+            print(f"\n{self.colors.RED}✗ Unexpected error in step '{step_name}': {str(e)}{self.colors.END}")
             raise
 
-    def _setup_python_venv(self):
-        """Create Python virtual environment"""
-        self._run_command(["python3", "-m", "venv", str(self.venv_path)])
-
-    def _pip_install(self, requirements: List[str]):
-        """Install Python packages from requirements files"""
-        pip_path = self._get_pip_path()
-        for req_file in requirements:
-            req_path = self.worktree_path / req_file
-            if req_path.exists():
-                self._run_command([str(pip_path), "install", "-r", str(req_path)])
-            # Skip silently if file doesn't exist - error will be caught by caller
-
-    def _pip_install_editable(self, path: str):
-        """Install package in editable mode"""
-        pip_path = self._get_pip_path()
-        install_path = self.worktree_path / path
-        self._run_command([str(pip_path), "install", "-e", str(install_path)])
-
-    def _pip_install_package(self, package: str):
-        """Install a single Python package"""
-        pip_path = self._get_pip_path()
-        self._run_command([str(pip_path), "install", package])
-
-    def _playwright_install(self):
-        """Install Playwright browsers"""
-        playwright_path = self._get_executable_path("playwright")
-        self._run_command([str(playwright_path), "install"])
-
-    def _precommit_install(self, path: str):
-        """Install pre-commit hooks"""
-        precommit_path = self._get_executable_path("pre-commit")
-        install_path = self.worktree_path / path
-        self._run_command([str(precommit_path), "install"], cwd=install_path)
-
-    def _npm_install(self, path: str):
-        """Install Node dependencies"""
-        install_path = self.worktree_path / path
-        if install_path.exists():
-            self._run_command(["npm", "install"], cwd=install_path)
-        # Skip silently if path doesn't exist - error will be caught by caller
-
-    def _run_custom_command(self, command: str, cwd: Optional[str] = None):
-        """Run a custom shell command"""
-        work_dir = self.worktree_path / cwd if cwd else self.worktree_path
-        self._run_command([command], cwd=work_dir, shell=True)
 
     def _generate_docker_compose_override(self, worktree_name: str, port_offset: int, config: Dict[str, Any]):
         """Generate Docker Compose override file for worktree"""
@@ -460,6 +494,10 @@ class SetupExecutor:
         services_override = {}
 
         for service_name, service_config in services_config.items():
+            # Skip services that are only meant to have ports commented out (not in Docker for dev)
+            if service_config.get('skip_override', False):
+                continue
+
             internal_port = service_config.get('internal')
             if internal_port:
                 external_port = internal_port + port_offset
@@ -468,7 +506,7 @@ class SetupExecutor:
                 # Build port mappings list
                 port_mappings = [f"{external_port}:{internal_port}"]
 
-                # Add additional port mappings (e.g., nginx has both 80 and 3000)
+                # Add additional port mappings (e.g., nginx has both 80 and 3000 -> 80)
                 additional_ports = service_config.get('additional_ports', [])
                 for add_port in additional_ports:
                     add_external = add_port + port_offset
@@ -485,6 +523,14 @@ class SetupExecutor:
                 if env_overrides:
                     service_override['environment'] = env_overrides
 
+                # Build volumes list (handles both hot reloading and data isolation)
+                final_volumes = []
+
+                # Add volume mounts if specified (for hot reloading)
+                volume_mounts = service_config.get('volumes', [])
+                if volume_mounts:
+                    final_volumes.extend(volume_mounts)
+
                 # Handle volume renaming for data isolation
                 if service_config.get('isolate_data', False):
                     # Get volume configuration from base docker-compose.yml
@@ -492,7 +538,6 @@ class SetupExecutor:
                     base_volumes = base_service.get('volumes', [])
 
                     if base_volumes:
-                        renamed_volumes = []
                         for vol in base_volumes:
                             # Parse volume spec: volume_name:mount_path[:options]
                             if isinstance(vol, str) and ':' in vol:
@@ -502,13 +547,19 @@ class SetupExecutor:
 
                                 # Rename the volume while preserving mount path
                                 renamed_vol_name = f"{vol_name}-{worktree_name}"
-                                renamed_volumes.append(f"{renamed_vol_name}:{mount_spec}")
+                                final_volumes.append(f"{renamed_vol_name}:{mount_spec}")
                             else:
                                 # Keep non-named volumes as-is
-                                renamed_volumes.append(vol)
+                                final_volumes.append(vol)
+                else:
+                    # If not isolating data, include base volumes
+                    base_service = base_services.get(service_name, {})
+                    base_volumes = base_service.get('volumes', [])
+                    if base_volumes:
+                        final_volumes.extend(base_volumes)
 
-                        if renamed_volumes:
-                            service_override['volumes'] = renamed_volumes
+                if final_volumes:
+                    service_override['volumes'] = final_volumes
 
                 services_override[service_name] = service_override
 
@@ -654,19 +705,38 @@ class WorktreeManager:
         self.metadata = WorktreeMetadata()
 
     def _load_setup_config(self) -> Optional[Dict]:
-        """Load setup configuration if it exists"""
+        """Load setup configuration if it exists (supports both YAML and JSON)"""
+        # Look for repo-specific setup files first
         possible_configs = [
-            self.main_repo / ".worktree-setup.json",
-            Path.home() / ".worktree-setup.json",
+            # Repo-specific YAML (preferred)
+            (self.main_repo / f"{self.repo_alias}-setup.yaml", "yaml"),
+            (self.main_repo / f"{self.repo_alias}-setup.yml", "yaml"),
+            # Repo-specific JSON (backward compatibility)
+            (self.main_repo / f"{self.repo_alias}-setup.json", "json"),
+            # Generic setup files in repo
+            (self.main_repo / ".worktree-setup.yaml", "yaml"),
+            (self.main_repo / ".worktree-setup.yml", "yaml"),
+            (self.main_repo / ".worktree-setup.json", "json"),
+            # Global setup files
+            (Path.home() / ".worktree-setup.yaml", "yaml"),
+            (Path.home() / ".worktree-setup.yml", "yaml"),
+            (Path.home() / ".worktree-setup.json", "json"),
         ]
 
-        for config_path in possible_configs:
+        for config_path, format_type in possible_configs:
             if config_path.exists():
                 try:
                     with open(config_path, 'r') as f:
-                        return json.load(f)
-                except json.JSONDecodeError as e:
-                    print(f"{Colors.YELLOW}⚠ Warning: Invalid JSON in {config_path}: {e}{Colors.END}")
+                        if format_type == "yaml":
+                            if not HAS_YAML:
+                                print(f"{Colors.YELLOW}⚠ Warning: PyYAML not installed, skipping {config_path}{Colors.END}")
+                                print(f"{Colors.YELLOW}  Install with: pip install pyyaml{Colors.END}")
+                                continue
+                            return yaml.safe_load(f)
+                        else:  # json
+                            return json.load(f)
+                except (json.JSONDecodeError, yaml.YAMLError) as e:
+                    print(f"{Colors.YELLOW}⚠ Warning: Invalid {format_type.upper()} in {config_path}: {e}{Colors.END}")
                     continue
 
         return None
@@ -705,6 +775,79 @@ class WorktreeManager:
         """Get the full path for a worktree"""
         return self.worktree_base / name
 
+    def _remove_conflicting_ports(self, worktree_path: Path, docker_config: Dict[str, Any]):
+        """Remove port mappings from base docker-compose.yml that conflict with override
+
+        This prevents Docker Compose from merging base and override ports.
+        """
+        compose_dir = docker_config.get('compose_dir', 'deployment/docker_compose')
+        base_compose_file = worktree_path / compose_dir / 'docker-compose.yml'
+
+        if not base_compose_file.exists():
+            return
+
+        try:
+            # Read the file
+            with open(base_compose_file, 'r') as f:
+                lines = f.readlines()
+
+            # Track which services have ports configured in our setup
+            services_with_overrides = set(docker_config.get('services', {}).keys())
+
+            modified = False
+            new_lines = []
+            in_service = None
+            in_ports_section = False
+            indent_level = 0
+
+            for i, line in enumerate(lines):
+                # Detect service definition
+                if line.strip() and not line.strip().startswith('#') and ':' in line:
+                    # Check if this is a top-level service (2 spaces indent or less)
+                    leading_spaces = len(line) - len(line.lstrip())
+                    if leading_spaces <= 2 and line.strip().endswith(':'):
+                        service_name = line.strip().rstrip(':')
+                        if service_name in services_with_overrides:
+                            in_service = service_name
+                        else:
+                            in_service = None
+
+                # Detect ports section within our service
+                if in_service and line.strip() == 'ports:':
+                    in_ports_section = True
+                    indent_level = len(line) - len(line.lstrip())
+                    # Comment out the ports: line
+                    new_lines.append(line.replace('ports:', '# ports:  # Managed by worktree override'))
+                    modified = True
+                    continue
+
+                # If in ports section, comment out port mappings
+                if in_ports_section:
+                    current_indent = len(line) - len(line.lstrip())
+                    # Check if we're still in the ports array
+                    if current_indent > indent_level and (line.strip().startswith('-') or not line.strip()):
+                        # Comment out this port mapping
+                        if line.strip():
+                            new_lines.append('#' + line)
+                            modified = True
+                        else:
+                            new_lines.append(line)
+                        continue
+                    else:
+                        # We've exited the ports section
+                        in_ports_section = False
+
+                new_lines.append(line)
+
+            if modified:
+                # Write back
+                with open(base_compose_file, 'w') as f:
+                    f.writelines(new_lines)
+                self._print_success(f"Commented out conflicting ports in {base_compose_file.name}")
+
+        except Exception as e:
+            self._print_warning(f"Could not modify base docker-compose.yml: {e}")
+
     def _get_existing_worktrees(self) -> Dict[str, str]:
         """Get list of existing worktrees"""
         result = self._run_command(
@@ -729,7 +872,7 @@ class WorktreeManager:
 
         return worktrees
 
-    def create_worktree(self, name: str, base_branch: str = "origin/main", skip_setup: bool = False):
+    def create_worktree(self, name: str, base_branch: str = "origin/main", skip_setup: bool = False, verbose: bool = False):
         """Create a new worktree with optional environment setup"""
         worktree_path = self._get_worktree_path(name)
 
@@ -773,6 +916,9 @@ class WorktreeManager:
                 ports_map = executor._generate_docker_compose_override(name, port_offset, docker_config)
 
                 if ports_map:
+                    # Remove conflicting port mappings from base docker-compose.yml
+                    self._remove_conflicting_ports(worktree_path, docker_config)
+
                     self._print_success("Docker Compose override generated")
                     # Save metadata
                     self.metadata.add_worktree(self.repo_alias, name, port_offset, ports_map)
@@ -784,7 +930,7 @@ class WorktreeManager:
 
                 for step in setup_config["setup_steps"]:
                     try:
-                        executor.execute_step(step)
+                        executor.execute_step(step, verbose=verbose)
                     except Exception as e:
                         self._print_warning(f"Setup step failed: {step.get('name', step.get('type'))} - {str(e)}")
                         print(f"{Colors.YELLOW}Continuing with remaining steps...{Colors.END}")
@@ -811,6 +957,27 @@ class WorktreeManager:
             if response.lower() != 'y':
                 print("Cancelled.")
                 return
+
+        # Stop Docker Compose services if configured
+        base_file, override_file, compose_dir, detected_name = self._get_docker_compose_files(name)
+        if base_file and override_file and compose_dir:
+            spinner = Spinner(f"Stopping services for worktree '{name}'")
+            spinner.start()
+            try:
+                cmd = [
+                    "docker", "compose",
+                    "-f", str(base_file),
+                    "-f", str(override_file),
+                    "down"
+                ]
+                self._run_command(cmd, cwd=Path(compose_dir), check=False)
+                spinner.stop(f"{Colors.GREEN}✓{Colors.END} Services stopped")
+            except subprocess.CalledProcessError:
+                spinner.stop()
+                self._print_warning(f"Could not stop services (they may not be running)")
+            except Exception as e:
+                spinner.stop()
+                self._print_warning(f"Could not stop services: {e}")
 
         # Remove worktree with spinner
         spinner = Spinner(f"Removing worktree '{name}'")
@@ -1150,8 +1317,551 @@ class WorktreeManager:
 
         self._run_command(cmd, cwd=Path(compose_dir))
 
+    def _get_worktree_env_file(self, worktree_path: Path, name: str) -> Optional[Path]:
+        """Generate environment file with worktree-specific ports for Docker infrastructure and local services"""
+        # Get port assignments for Docker services and port offset
+        ports = self.metadata.get_worktree_ports(self.repo_alias, name)
+        if not ports:
+            return None
+
+        # Get port offset from metadata to calculate local service ports
+        port_offset = 0
+        if self.repo_alias in self.metadata.metadata and name in self.metadata.metadata[self.repo_alias]:
+            port_offset = self.metadata.metadata[self.repo_alias][name].get('port_offset', 0)
+
+        # Calculate unique ports for local services
+        backend_port = 8080 + port_offset
+        model_server_port = 9000 + port_offset
+        frontend_port = 3000 + port_offset
+
+        env_file = worktree_path / ".env.worktree"
+
+        with open(env_file, 'w') as f:
+            f.write(f"# Auto-generated environment for worktree: {name}\n")
+            f.write(f"# DO NOT EDIT - managed by worktree manager\n")
+            f.write(f"# Port offset: {port_offset}\n\n")
+
+            # Database configuration
+            if 'relational_db' in ports:
+                f.write(f"POSTGRES_HOST=localhost\n")
+                f.write(f"POSTGRES_PORT={ports['relational_db']}\n")
+                f.write(f"POSTGRES_USER=postgres\n")
+                f.write(f"POSTGRES_PASSWORD=password\n")
+                f.write(f"POSTGRES_DB=postgres\n")
+
+            # Vespa search configuration
+            if 'index' in ports:
+                f.write(f"VESPA_HOST=localhost\n")
+                f.write(f"VESPA_PORT={ports['index']}\n")
+                f.write(f"VESPA_TENANT_PORT={ports['index']}\n")
+
+            # Redis configuration
+            if 'cache' in ports:
+                f.write(f"REDIS_HOST=localhost\n")
+                f.write(f"REDIS_PORT={ports['cache']}\n")
+
+            # MinIO S3 configuration
+            if 'minio' in ports:
+                f.write(f"S3_ENDPOINT_URL=http://localhost:{ports['minio']}\n")
+                f.write(f"S3_AWS_ACCESS_KEY_ID=minioadmin\n")
+                f.write(f"S3_AWS_SECRET_ACCESS_KEY=minioadmin\n")
+
+            # Model server configuration (running locally, not in Docker)
+            f.write(f"\n# Model servers (running locally with unique ports)\n")
+            f.write(f"MODEL_SERVER_HOST=localhost\n")
+            f.write(f"MODEL_SERVER_PORT={model_server_port}\n")
+            f.write(f"INDEXING_MODEL_SERVER_HOST=localhost\n")
+            f.write(f"INDEXING_MODEL_SERVER_PORT={model_server_port}\n")
+
+            # API server configuration (running locally with unique port)
+            f.write(f"\n# API server (running locally with unique port)\n")
+            f.write(f"INTERNAL_URL=http://localhost:{backend_port}\n")
+
+            # Frontend configuration (running locally with unique port)
+            f.write(f"\n# Frontend server (running locally with unique port)\n")
+            f.write(f"NEXT_PUBLIC_API_URL=http://localhost:{backend_port}\n")
+            f.write(f"PORT={frontend_port}\n")
+
+        return env_file
+
+    def dev_start(self):
+        """Start all development services (Docker + Backend + Frontend)"""
+        base_file, override_file, compose_dir, name = self._get_docker_compose_files()
+
+        if not base_file or not override_file or not name:
+            print(f"{Colors.RED}Error: Development mode not available{Colors.END}")
+            print(f"\n{Colors.BOLD}This worktree is not configured for development.{Colors.END}")
+            sys.exit(1)
+
+        worktree_path = self._get_worktree_path(name)
+
+        print(f"{Colors.BOLD}Starting development environment for '{name}'...{Colors.END}\n")
+
+        # 1. Start Docker services - only infrastructure services
+        # Get the list of infrastructure services from setup config
+        setup_config = self._load_setup_config()
+        docker_config = setup_config.get('docker_compose', {})
+        infrastructure_services = []
+
+        # Only infrastructure services (those without skip_override flag)
+        for service_name, service_config in docker_config.get('services', {}).items():
+            if not service_config.get('skip_override', False):
+                infrastructure_services.append(service_name)
+
+        spinner = Spinner("Starting Docker infrastructure services")
+        spinner.start()
+        try:
+            # Start only infrastructure services
+            cmd = [
+                "docker", "compose",
+                "-f", str(base_file),
+                "-f", str(override_file),
+                "up", "-d", "--no-deps"  # --no-deps prevents starting dependent services
+            ]
+            cmd.extend(infrastructure_services)
+
+            self._run_command(cmd, cwd=Path(compose_dir))
+            spinner.stop(f"{Colors.GREEN}✓{Colors.END} Docker infrastructure services started")
+        except subprocess.CalledProcessError:
+            spinner.stop()
+            sys.exit(1)
+
+        # 2. Generate environment file and get port offset
+        env_file = self._get_worktree_env_file(worktree_path, name)
+        if env_file:
+            self._print_success(f"Environment file generated: {env_file}")
+
+        # Get port offset to calculate service ports
+        port_offset = 0
+        if self.repo_alias in self.metadata.metadata and name in self.metadata.metadata[self.repo_alias]:
+            port_offset = self.metadata.metadata[self.repo_alias][name].get('port_offset', 0)
+
+        # Calculate unique ports for local services
+        backend_port = 8080 + port_offset
+        model_server_port = 9000 + port_offset
+        frontend_port = 3000 + port_offset
+
+        # 3. Run database migrations
+        print(f"\n{Colors.BLUE}==>{Colors.END} Running database migrations...")
+        migration_cmd = f"cd {worktree_path}/backend && source ../.venv/bin/activate && set -a && source {env_file} && set +a && alembic upgrade head"
+        try:
+            subprocess.run(migration_cmd, shell=True, check=True, executable='/bin/bash')
+            self._print_success(f"Database migrations completed")
+        except subprocess.CalledProcessError as e:
+            self._print_warning(f"Failed to run database migrations: {e}")
+            print(f"{Colors.YELLOW}You may need to run migrations manually{Colors.END}")
+
+        # 4. Start model server in background
+        print(f"\n{Colors.BLUE}==>{Colors.END} Starting model server...")
+        model_server_log = worktree_path / ".model-server.log"
+        # Use a wrapper script to properly capture the PID
+        model_server_cmd = f"""cd {worktree_path}/backend && source ../.venv/bin/activate && set -a && source {env_file} && set +a && {{
+            uvicorn model_server.main:app --reload --port {model_server_port} > {model_server_log} 2>&1 &
+            echo $! > {worktree_path}/.model-server.pid
+        }}"""
+
+        try:
+            subprocess.run(model_server_cmd, shell=True, check=True, executable='/bin/bash')
+            self._print_success(f"Model server started (logs: {model_server_log})")
+        except subprocess.CalledProcessError as e:
+            self._print_warning(f"Failed to start model server: {e}")
+
+        # 5. Start backend API server in background
+        print(f"{Colors.BLUE}==>{Colors.END} Starting backend API server...")
+        backend_log = worktree_path / ".backend.log"
+        backend_cmd = f"""cd {worktree_path}/backend && source ../.venv/bin/activate && set -a && source {env_file} && set +a && {{
+            uvicorn onyx.main:app --reload --port {backend_port} > {backend_log} 2>&1 &
+            echo $! > {worktree_path}/.backend.pid
+        }}"""
+
+        try:
+            subprocess.run(backend_cmd, shell=True, check=True, executable='/bin/bash')
+            self._print_success(f"Backend started (logs: {backend_log})")
+        except subprocess.CalledProcessError as e:
+            self._print_warning(f"Failed to start backend: {e}")
+
+        # 6. Start Celery workers
+        celery_workers = [
+            ("primary", "celery", "--pool=threads --concurrency=4 --prefetch-multiplier=1"),
+            ("light", "vespa_metadata_sync,connector_deletion,doc_permissions_upsert,index_attempt_cleanup", "--pool=threads --concurrency=64 --prefetch-multiplier=8"),
+            ("heavy", "connector_pruning,connector_doc_permissions_sync,connector_external_group_sync", "--pool=threads --concurrency=4 --prefetch-multiplier=1"),
+            ("docfetching", "connector_doc_fetching,user_files_indexing", "--pool=threads --concurrency=1 --prefetch-multiplier=1"),
+            ("docprocessing", "docprocessing", "--pool=threads --concurrency=6 --prefetch-multiplier=1"),
+            ("monitoring", "monitoring", "--pool=solo --concurrency=1 --prefetch-multiplier=1"),
+            ("user_file_processing", "user_file_processing,user_file_project_sync", "--pool=threads"),
+        ]
+
+        print(f"{Colors.BLUE}==>{Colors.END} Starting Celery workers...")
+        for worker_name, queues, pool_args in celery_workers:
+            log_file = worktree_path / f".celery-{worker_name}.log"
+            celery_cmd = f"""cd {worktree_path}/backend && source ../.venv/bin/activate && set -a && source {env_file} && set +a && {{
+                celery -A onyx.background.celery.versioned_apps.{worker_name} worker --loglevel=INFO --hostname={worker_name}@%n -Q {queues} {pool_args} > {log_file} 2>&1 &
+                echo $! > {worktree_path}/.celery-{worker_name}.pid
+            }}"""
+
+            try:
+                subprocess.run(celery_cmd, shell=True, check=True, executable='/bin/bash')
+            except subprocess.CalledProcessError as e:
+                self._print_warning(f"Failed to start Celery worker {worker_name}: {e}")
+
+        # Start Celery beat
+        beat_log = worktree_path / ".celery-beat.log"
+        beat_cmd = f"""cd {worktree_path}/backend && source ../.venv/bin/activate && set -a && source {env_file} && set +a && {{
+            celery -A onyx.background.celery.versioned_apps.beat beat --loglevel=INFO > {beat_log} 2>&1 &
+            echo $! > {worktree_path}/.celery-beat.pid
+        }}"""
+
+        try:
+            subprocess.run(beat_cmd, shell=True, check=True, executable='/bin/bash')
+            self._print_success(f"Celery workers started")
+        except subprocess.CalledProcessError as e:
+            self._print_warning(f"Failed to start Celery beat: {e}")
+
+        # 7. Start frontend server in background
+        print(f"{Colors.BLUE}==>{Colors.END} Starting frontend web server...")
+        frontend_log = worktree_path / ".frontend.log"
+        # Frontend will pick up env vars from both .vscode/.env and .env.worktree
+        # Use grep to filter out lines with <REPLACE and then source
+        vscode_env = worktree_path / ".vscode/.env"
+        frontend_cmd = f"""cd {worktree_path}/web && set -a && grep -v '<REPLACE' {vscode_env} | grep -v '^#' | grep -v '^$' | while IFS= read -r line; do export \"$line\"; done && source {env_file} && set +a && {{
+            npm run dev > {frontend_log} 2>&1 &
+            echo $! > {worktree_path}/.frontend.pid
+        }}"""
+
+        try:
+            subprocess.run(frontend_cmd, shell=True, check=True, executable='/bin/bash')
+            self._print_success(f"Frontend started (logs: {frontend_log})")
+        except subprocess.CalledProcessError as e:
+            self._print_warning(f"Failed to start frontend: {e}")
+
+        time.sleep(3)  # Give services a moment to start
+
+        print(f"\n{Colors.GREEN}{Colors.BOLD}✓ Full development environment ready!{Colors.END}")
+        print(f"\n{Colors.BOLD}Access your application:{Colors.END}")
+        print(f"  Frontend:     http://localhost:{frontend_port}")
+        print(f"  Backend API:  http://localhost:{backend_port}")
+        print(f"  Model Server: http://localhost:{model_server_port}")
+
+        ports = self.metadata.get_worktree_ports(self.repo_alias, name)
+        if ports:
+            print(f"\n{Colors.BOLD}Infrastructure ports:{Colors.END}")
+            for svc, port in sorted(ports.items()):
+                print(f"  {svc}: {port}")
+
+        print(f"\n{Colors.BOLD}Running services:{Colors.END}")
+        print(f"  - Backend API Server (uvicorn with hot reload)")
+        print(f"  - Model Server (uvicorn with hot reload)")
+        print(f"  - Frontend (Next.js dev server with hot reload)")
+        print(f"  - 7 Celery workers (primary, light, heavy, docfetching, docprocessing, monitoring, user_file_processing)")
+        print(f"  - Celery Beat scheduler")
+
+        print(f"\n{Colors.BOLD}View logs:{Colors.END}")
+        print(f"  Backend:        tail -f {backend_log}")
+        print(f"  Model Server:   tail -f {model_server_log}")
+        print(f"  Frontend:       tail -f {frontend_log}")
+        print(f"  Celery Primary: tail -f {worktree_path}/.celery-primary.log")
+        print(f"  All Celery:     tail -f {worktree_path}/.celery-*.log")
+
+        print(f"\n{Colors.BOLD}Manage:{Colors.END}")
+        print(f"  Check status: worktree {self.repo_alias} dev status")
+        print(f"  Stop all:     worktree {self.repo_alias} dev stop")
+        print(f"  Restart all:  worktree {self.repo_alias} dev restart")
+
+    def dev_stop(self):
+        """Stop all development services"""
+        base_file, override_file, compose_dir, name = self._get_docker_compose_files()
+
+        if not base_file or not override_file or not name:
+            print(f"{Colors.RED}Error: Development mode not available{Colors.END}")
+            sys.exit(1)
+
+        worktree_path = self._get_worktree_path(name)
+
+        print(f"{Colors.BOLD}Stopping development environment for '{name}'...{Colors.END}\n")
+
+        # Define services with their PID files and process search patterns
+        services_to_stop = [
+            ("Frontend", ".frontend.pid", f"npm.*{worktree_path}/web"),
+            ("Backend API", ".backend.pid", f"uvicorn onyx.main.*{worktree_path}/backend"),
+            ("Model Server", ".model-server.pid", f"uvicorn model_server.main.*{worktree_path}/backend"),
+            ("Celery Primary", ".celery-primary.pid", f"celery.*primary.*{worktree_path}/backend"),
+            ("Celery Light", ".celery-light.pid", f"celery.*light.*{worktree_path}/backend"),
+            ("Celery Heavy", ".celery-heavy.pid", f"celery.*heavy.*{worktree_path}/backend"),
+            ("Celery Docfetching", ".celery-docfetching.pid", f"celery.*docfetching.*{worktree_path}/backend"),
+            ("Celery Docprocessing", ".celery-docprocessing.pid", f"celery.*docprocessing.*{worktree_path}/backend"),
+            ("Celery Monitoring", ".celery-monitoring.pid", f"celery.*monitoring.*{worktree_path}/backend"),
+            ("Celery User File Processing", ".celery-user_file_processing.pid", f"celery.*user_file_processing.*{worktree_path}/backend"),
+            ("Celery Beat", ".celery-beat.pid", f"celery.*beat.*{worktree_path}/backend"),
+        ]
+
+        # First pass: try to kill by PID file
+        pids_to_check = []
+        for service_name, pid_file_name, pattern in services_to_stop:
+            pid_file = worktree_path / pid_file_name
+            if pid_file.exists():
+                try:
+                    with open(pid_file, 'r') as f:
+                        pid = f.read().strip()
+                    if pid:
+                        # Verify PID is still running before killing
+                        result = subprocess.run(f"ps -p {pid}", shell=True, capture_output=True)
+                        if result.returncode == 0:
+                            subprocess.run(f"kill {pid}", shell=True, check=False)
+                            pids_to_check.append(pid)
+                except Exception:
+                    pass
+
+        # Give processes time to shut down gracefully
+        time.sleep(2)
+
+        # Second pass: find and kill by process pattern (handles cases where PID file is stale)
+        for service_name, pid_file_name, pattern in services_to_stop:
+            try:
+                # Find processes matching the pattern
+                result = subprocess.run(
+                    f"pgrep -f '{pattern}'",
+                    shell=True,
+                    capture_output=True,
+                    text=True
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    pids = result.stdout.strip().split('\n')
+                    for pid in pids:
+                        subprocess.run(f"kill {pid}", shell=True, check=False)
+            except Exception:
+                pass
+
+        # Give processes another moment
+        time.sleep(2)
+
+        # Third pass: force kill any remaining processes
+        for service_name, pid_file_name, pattern in services_to_stop:
+            try:
+                result = subprocess.run(
+                    f"pgrep -f '{pattern}'",
+                    shell=True,
+                    capture_output=True,
+                    text=True
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    pids = result.stdout.strip().split('\n')
+                    for pid in pids:
+                        subprocess.run(f"kill -9 {pid}", shell=True, check=False)
+            except Exception:
+                pass
+
+        # Clean up PID files
+        for service_name, pid_file_name, pattern in services_to_stop:
+            pid_file = worktree_path / pid_file_name
+            if pid_file.exists():
+                try:
+                    pid_file.unlink()
+                except Exception:
+                    pass
+
+        # Extra sleep to ensure ports are released
+        time.sleep(1)
+
+        self._print_success("All application services stopped")
+
+        # 3. Stop Docker services
+        spinner = Spinner("Stopping Docker services")
+        spinner.start()
+        try:
+            cmd = [
+                "docker", "compose",
+                "-f", str(base_file),
+                "-f", str(override_file),
+                "down"
+            ]
+            self._run_command(cmd, cwd=Path(compose_dir))
+            spinner.stop(f"{Colors.GREEN}✓{Colors.END} Docker services stopped")
+        except subprocess.CalledProcessError:
+            spinner.stop()
+
+        print(f"\n{Colors.GREEN}✓ Development environment stopped{Colors.END}")
+
+    def dev_restart(self):
+        """Restart all development services"""
+        self.dev_stop()
+        time.sleep(1)
+        self.dev_start()
+
+    def dev_status(self):
+        """Show status of all development services"""
+        base_file, override_file, compose_dir, name = self._get_docker_compose_files()
+
+        if not base_file or not override_file or not name:
+            print(f"{Colors.RED}Error: Development mode not available{Colors.END}")
+            sys.exit(1)
+
+        worktree_path = self._get_worktree_path(name)
+
+        print(f"{Colors.BOLD}Development Environment Status for '{name}':{Colors.END}\n")
+
+        # Check all services
+        services_to_check = [
+            ("Frontend", ".frontend.pid"),
+            ("Backend API", ".backend.pid"),
+            ("Model Server", ".model-server.pid"),
+            ("Celery Primary", ".celery-primary.pid"),
+            ("Celery Light", ".celery-light.pid"),
+            ("Celery Heavy", ".celery-heavy.pid"),
+            ("Celery Docfetching", ".celery-docfetching.pid"),
+            ("Celery Docprocessing", ".celery-docprocessing.pid"),
+            ("Celery Monitoring", ".celery-monitoring.pid"),
+            ("Celery User File Processing", ".celery-user_file_processing.pid"),
+            ("Celery Beat", ".celery-beat.pid"),
+        ]
+
+        print(f"{Colors.BOLD}Application Services:{Colors.END}\n")
+        for service_name, pid_file_name in services_to_check:
+            pid_file = worktree_path / pid_file_name
+            if pid_file.exists():
+                try:
+                    with open(pid_file, 'r') as f:
+                        pid = f.read().strip()
+                    result = subprocess.run(f"ps -p {pid}", shell=True, capture_output=True)
+                    if result.returncode == 0:
+                        print(f"{Colors.GREEN}✓{Colors.END} {service_name} (PID {pid})")
+                    else:
+                        print(f"{Colors.RED}✗{Colors.END} {service_name} (not running)")
+                except Exception:
+                    print(f"{Colors.RED}✗{Colors.END} {service_name} (error)")
+            else:
+                print(f"{Colors.YELLOW}○{Colors.END} {service_name} (not started)")
+
+        # Check Docker services
+        print(f"\n{Colors.BOLD}Docker Services:{Colors.END}\n")
+        cmd = [
+            "docker", "compose",
+            "-f", str(base_file),
+            "-f", str(override_file),
+            "ps"
+        ]
+        self._run_command(cmd, cwd=Path(compose_dir))
+
+        # Show port information
+        ports = self.metadata.get_worktree_ports(self.repo_alias, name)
+        if ports:
+            print(f"\n{Colors.BOLD}Service Ports:{Colors.END}")
+            for svc, port in sorted(ports.items()):
+                print(f"  {svc}: {port}")
+
+
+def run_tests():
+    """Run the test suite in an isolated virtual environment"""
+    script_dir = Path(__file__).parent
+    test_venv = script_dir / ".test-venv"
+    test_dir = script_dir / "tests"
+
+    if not test_dir.exists():
+        print(f"{Colors.RED}Error: Tests directory not found at {test_dir}{Colors.END}")
+        sys.exit(1)
+
+    # Create test virtual environment if it doesn't exist
+    if not test_venv.exists():
+        print(f"{Colors.BLUE}==>{Colors.END} Creating test virtual environment...")
+        try:
+            subprocess.run(
+                ["python3", "-m", "venv", str(test_venv)],
+                check=True
+            )
+            print(f"{Colors.GREEN}✓{Colors.END} Test venv created")
+        except subprocess.CalledProcessError as e:
+            print(f"{Colors.RED}Failed to create test venv{Colors.END}")
+            sys.exit(1)
+
+        # Install test dependencies
+        print(f"{Colors.BLUE}==>{Colors.END} Installing test dependencies...")
+        pip_path = test_venv / "bin" / "pip"
+        requirements_path = script_dir / "test-requirements.txt"
+
+        if not requirements_path.exists():
+            print(f"{Colors.RED}Error: test-requirements.txt not found{Colors.END}")
+            sys.exit(1)
+
+        try:
+            subprocess.run(
+                [str(pip_path), "install", "-q", "--upgrade", "pip"],
+                check=True
+            )
+            subprocess.run(
+                [str(pip_path), "install", "-q", "-r", str(requirements_path)],
+                check=True
+            )
+            print(f"{Colors.GREEN}✓{Colors.END} Dependencies installed")
+        except subprocess.CalledProcessError:
+            print(f"{Colors.RED}Failed to install test dependencies{Colors.END}")
+            sys.exit(1)
+
+    # Run tests
+    print(f"\n{Colors.BOLD}Running tests...{Colors.END}\n")
+    pytest_path = test_venv / "bin" / "pytest"
+
+    # Pass through any additional arguments to pytest
+    extra_args = sys.argv[2:] if len(sys.argv) > 2 else []
+
+    try:
+        result = subprocess.run(
+            [str(pytest_path), "-v"] + extra_args + [str(test_dir)],
+            cwd=script_dir
+        )
+        sys.exit(result.returncode)
+    except KeyboardInterrupt:
+        print(f"\n{Colors.YELLOW}Tests interrupted{Colors.END}")
+        sys.exit(130)
+
+
+def run_e2e_test():
+    """Run end-to-end integration test"""
+    script_dir = Path(__file__).parent
+    e2e_script = script_dir / "e2e-test.sh"
+
+    if not e2e_script.exists():
+        print(f"{Colors.RED}Error: E2E test script not found at {e2e_script}{Colors.END}")
+        sys.exit(1)
+
+    # Get repository alias from command line (after 'test-e2e')
+    repo_alias = sys.argv[2] if len(sys.argv) > 2 else None
+
+    if not repo_alias:
+        print(f"{Colors.BOLD}Running end-to-end integration test{Colors.END}\n")
+        print(f"{Colors.YELLOW}Usage: worktree test-e2e <repo-alias>{Colors.END}")
+        print(f"\nExample: worktree test-e2e onyx\n")
+
+        # Show available repositories
+        config = RepoConfig()
+        if config.repos:
+            print(f"{Colors.BOLD}Available repositories:{Colors.END}")
+            for alias, path in config.repos.items():
+                print(f"  {alias} → {path}")
+        else:
+            print(f"{Colors.YELLOW}No repositories configured yet.{Colors.END}")
+            print(f"Add one with: worktree repo add <alias> <path>")
+        sys.exit(1)
+
+    try:
+        result = subprocess.run(
+            [str(e2e_script), repo_alias],
+            cwd=script_dir
+        )
+        sys.exit(result.returncode)
+    except KeyboardInterrupt:
+        print(f"\n{Colors.YELLOW}E2E test interrupted{Colors.END}")
+        sys.exit(130)
+
 
 def main():
+    # Check for special commands first
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "run-tests":
+            run_tests()
+            return
+        elif sys.argv[1] == "test-e2e":
+            run_e2e_test()
+            return
+
     # Check if first argument is a repository alias before argparse
     config = RepoConfig()
 
@@ -1176,6 +1886,7 @@ def main():
         new_parser.add_argument("name", help="Name for the new worktree")
         new_parser.add_argument("--base", default="origin/main", help="Base branch (default: origin/main)")
         new_parser.add_argument("--skip-setup", action="store_true", help="Skip setup steps")
+        new_parser.add_argument("--verbose", "-v", action="store_true", help="Show detailed output from setup steps")
 
         # Remove command
         rm_parser = wt_subparsers.add_parser("rm", help="Remove a worktree")
@@ -1189,6 +1900,14 @@ def main():
 
         # List command
         wt_subparsers.add_parser("list", help="List all worktrees")
+
+        # Dev command (simplified development workflow)
+        dev_parser = wt_subparsers.add_parser("dev", help="Development commands (run from worktree directory)")
+        dev_subparsers = dev_parser.add_subparsers(dest="dev_command")
+        dev_subparsers.add_parser("start", help="Start all services (Docker + Backend + Frontend)")
+        dev_subparsers.add_parser("stop", help="Stop all services")
+        dev_subparsers.add_parser("restart", help="Restart all services")
+        dev_status_parser = dev_subparsers.add_parser("status", help="Show status of all services")
 
         # Services command
         services_parser = wt_subparsers.add_parser("services", help="Manage Docker Compose services (run from worktree directory)")
@@ -1226,13 +1945,24 @@ def main():
         manager = WorktreeManager(repo_path, repo_alias)
 
         if wt_args.wt_command == "new":
-            manager.create_worktree(wt_args.name, wt_args.base, wt_args.skip_setup)
+            manager.create_worktree(wt_args.name, wt_args.base, wt_args.skip_setup, wt_args.verbose)
         elif wt_args.wt_command == "rm":
             manager.remove_worktree(wt_args.name, wt_args.force)
         elif wt_args.wt_command == "select":
             manager.select_worktree(wt_args.name, getattr(wt_args, 'shell_mode', False))
         elif wt_args.wt_command == "list":
             manager.list_worktrees()
+        elif wt_args.wt_command == "dev":
+            if wt_args.dev_command == "start":
+                manager.dev_start()
+            elif wt_args.dev_command == "stop":
+                manager.dev_stop()
+            elif wt_args.dev_command == "restart":
+                manager.dev_restart()
+            elif wt_args.dev_command == "status":
+                manager.dev_status()
+            else:
+                dev_parser.print_help()
         elif wt_args.wt_command == "services":
             if wt_args.services_command == "start":
                 manager.start_services(wt_args.services, wt_args.build)
@@ -1265,6 +1995,11 @@ Examples:
   worktree myapp new hotfix               Create worktree in myapp repo
   worktree myapp select hotfix            Switch to myapp hotfix worktree
   worktree onyx rm feature-xyz            Remove onyx worktree
+
+  # Run tests
+  worktree run-tests                      Run the test suite
+  worktree run-tests -k test_name         Run specific tests
+  worktree test-e2e <alias>               Run end-to-end integration test
         """
     )
 

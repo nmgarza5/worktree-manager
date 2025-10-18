@@ -256,37 +256,32 @@ Configure automated environment setup to run when creating new worktrees.
 
 ### Setup Configuration
 
-Create `.worktree-setup.json` in your repository root:
+Create a setup configuration file in your repository root (YAML format recommended):
 
 ```bash
 # For Onyx open-source project
 # Full configuration with Docker Compose and all setup steps
-cp onyx-setup.json ~/onyx/.worktree-setup.json
-
-# Or use the simplified example without Docker
-cp onyx-setup.example.json ~/onyx/.worktree-setup.json
+cp onyx-setup.yaml ~/onyx/onyx-setup.yaml
 
 # Or create your own
-cat > ~/myproject/.worktree-setup.json << 'EOF'
-{
-  "setup_steps": [
-    {
-      "name": "Python virtual environment",
-      "type": "python_venv"
-    },
-    {
-      "name": "Install dependencies",
-      "type": "pip_install",
-      "requirements": ["requirements.txt"]
-    }
-  ]
-}
+cat > ~/myproject/.worktree-setup.yaml << 'EOF'
+setup_steps:
+  - name: Python virtual environment
+    command: python3 -m venv .venv
+
+  - name: Install dependencies
+    command: .venv/bin/pip install -r requirements.txt
+
+  - name: Install package in editable mode
+    command: .venv/bin/pip install -e .
 EOF
 ```
 
+**Note:** The tool now uses arbitrary shell commands instead of predefined setup types. This gives you full flexibility to run any command you need during setup. If a command fails, full error output is surfaced so you can debug your setup script.
+
 ### Real-World Example: Onyx
 
-This tool was built for the [Onyx](https://github.com/danswer-ai/danswer) open-source project. See [`onyx-setup.json`](onyx-setup.json) for a complete configuration including:
+This tool was built for the [Onyx](https://github.com/danswer-ai/danswer) open-source project. See [`onyx-setup.yaml`](onyx-setup.yaml) for a complete configuration including:
 - Docker Compose service management (PostgreSQL, Redis, Vespa, Minio)
 - Python virtual environment setup
 - Backend and frontend dependency installation
@@ -298,29 +293,51 @@ The configuration enables running multiple Onyx worktrees simultaneously with is
 **Important:** Add these lines to your repository's `.gitignore`:
 ```gitignore
 # worktree manager
+*-setup.yaml
+*-setup.yml
+.worktree-setup.yaml
+.worktree-setup.yml
 .worktree-setup.json
 deployment/docker_compose/docker-compose.worktree-*.yml
 ```
 
 This prevents committing the setup configuration and generated Docker Compose override files.
 
-### Available Setup Steps
+### Setup Step Format
 
-**Python:**
-- `python_venv` - Create virtual environment
-- `pip_install` - Install from requirements files
-- `pip_install_editable` - Install package in editable mode
-- `pip_install_package` - Install specific package
-- `playwright_install` - Install Playwright browsers
-- `precommit_install` - Setup pre-commit hooks
+Each setup step is defined with:
+- `name`: A descriptive name for the step (shown in progress output)
+- `command`: The shell command to execute
+- `cwd` (optional): Working directory relative to worktree root
 
-**Node.js:**
-- `npm_install` - Install Node dependencies
+**Examples:**
 
-**Custom:**
-- `command` - Run custom shell command
+```yaml
+setup_steps:
+  # Basic command
+  - name: Create virtual environment
+    command: python3 -m venv .venv
 
-See `onyx-setup.example.json` for a complete configuration example.
+  # Command with working directory
+  - name: Install pre-commit hooks
+    command: ../.venv/bin/pre-commit install
+    cwd: backend
+
+  # Multiple commands using shell operators
+  - name: Install and setup
+    command: npm install && npm run build
+    cwd: web
+```
+
+**Error Handling:**
+
+If a setup command fails, the tool will display:
+- The command that failed
+- The exit code
+- Full stdout and stderr output
+- A reminder that this is a setup configuration issue
+
+This helps you debug your setup scripts quickly.
 
 ## Workflow Examples
 
@@ -413,6 +430,16 @@ worktree onyx new hotfix --base origin/v1.2.3
 worktree onyx new quick-test --skip-setup
 ```
 
+### Show Verbose Setup Output
+
+See detailed output from all setup commands (useful for debugging):
+
+```bash
+worktree onyx new feature-xyz --verbose
+# or
+worktree onyx new feature-xyz -v
+```
+
 ### Remove Without Confirmation
 
 ```bash
@@ -442,16 +469,117 @@ worktree repo add myrepo ~/path/to/repo
 
 ### Setup fails
 
-Setup steps continue even if one fails. Check the error and ensure required tools are installed:
-- Python 3.7+
-- Node.js (if using npm steps)
-- Additional tools as specified in your setup config
+Setup steps continue even if one fails. Check the error output which will show:
+- The exact command that failed
+- Exit code
+- Full stdout and stderr output
+
+Ensure all required tools are installed and your commands are correct in your setup configuration file.
+
+## Development
+
+### Running Tests
+
+The project includes comprehensive unit and integration tests. Run them using:
+
+```bash
+worktree run-tests                    # Run all tests
+worktree run-tests -k test_name       # Run specific tests
+worktree run-tests -v                 # Verbose output
+```
+
+The test runner automatically:
+- Creates an isolated test virtual environment (`.test-venv/`)
+- Installs test dependencies (pytest, pyyaml, etc.)
+- Runs all tests from the `tests/` directory
+
+**Test Coverage:**
+- **Unit tests**: `SetupExecutor.execute_step()` with various scenarios
+- **Config loading**: YAML/JSON parsing, priority, error handling
+- **Integration tests**: Complete setup workflows, file operations, shell features
+
+### End-to-End Integration Test
+
+Verify your installation works correctly by running the integration test against your actual repository:
+
+```bash
+worktree test-e2e <repo-alias>
+```
+
+For example:
+```bash
+worktree test-e2e onyx
+```
+
+This test automatically:
+1. **Verifies** your repository configuration
+2. **Creates** a temporary test setup configuration with command-based steps
+3. **Creates** a test worktree (`e2e-test-wt`) from your main branch
+4. **Runs** the test setup steps:
+   - Creates test directories
+   - Creates Python virtual environment
+   - Creates test files and markers
+   - Tests `cwd` (working directory) support
+   - Tests multiple shell commands
+5. **Verifies** all setup artifacts were created correctly
+6. **Tests** basic worktree operations (file creation, git staging)
+7. **Lists** all worktrees
+8. **Deletes** the test worktree and cleans up ALL artifacts
+9. **Verifies** complete cleanup (worktree, branch, and test files all removed)
+
+**Expected output:**
+```
+================================
+Worktree Manager E2E Test
+Repository: onyx
+================================
+
+==> Step 1: Verifying repository configuration
+✓ Repository configured: /Users/you/onyx
+✓ Setup configuration found: onyx-setup.yaml
+
+==> Step 2: Checking for existing test worktree
+✓ Ready to create test worktree
+
+==> Step 3: Creating test worktree
+✓ Worktree created: /Users/you/onyx-worktrees/e2e-test-wt
+
+==> Step 4: Verifying worktree
+✓ Git branch created: e2e-test-wt
+✓ Git working directory initialized
+
+Checking setup execution:
+✓ Virtual environment created
+✓ Setup created 5 new items
+
+==> Step 5: Listing all worktrees
+[worktree list output]
+
+==> Step 6: Testing worktree operations
+✓ File creation works
+✓ Git staging works
+
+==> Step 7: Deleting test worktree
+✓ Worktree deleted successfully
+✓ Git branch deleted successfully
+
+================================
+Test Results
+================================
+
+✓ ALL TESTS PASSED
+```
+
+Run this test after installation or after making changes to verify everything works correctly with your actual repository.
 
 ## Requirements
 
 - Python 3.7+
 - Git 2.5+ (for worktree support)
+- PyYAML (optional, for YAML config files): `pip install pyyaml`
 - Additional tools as needed by your setup configuration
+
+**Note:** JSON config files are still supported for backward compatibility, but YAML is recommended for better readability.
 
 ## Why Worktrees?
 

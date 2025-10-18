@@ -17,10 +17,15 @@ mkdir -p "$INSTALL_DIR"
 cp "$(dirname "$0")/worktree.py" "$INSTALL_DIR/$SCRIPT_NAME"
 chmod +x "$INSTALL_DIR/$SCRIPT_NAME"
 
+# Copy the e2e test script
+cp "$(dirname "$0")/e2e-test.sh" "$INSTALL_DIR/e2e-test.sh"
+chmod +x "$INSTALL_DIR/e2e-test.sh"
+
 # Copy the shell wrapper
 cp "$(dirname "$0")/worktree-shell-wrapper.sh" "$WRAPPER_FILE"
 
 echo "✓ Installed to $INSTALL_DIR/$SCRIPT_NAME"
+echo "✓ E2E test script installed to $INSTALL_DIR/e2e-test.sh"
 echo "✓ Shell wrapper installed to $WRAPPER_FILE"
 
 echo ""

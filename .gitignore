@@ -28,3 +28,8 @@ Thumbs.db
 .pytest_cache/
 .coverage
 htmlcov/
+.test-venv/
+
+# Claude Code
+.claude/
+.claude/*

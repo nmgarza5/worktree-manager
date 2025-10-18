@@ -2,14 +2,6 @@
   "docker_compose": {
     "compose_dir": "deployment/docker_compose",
     "services": {
-      "nginx": {
-        "internal": 80,
-        "description": "Web interface"
-      },
-      "api_server": {
-        "internal": 8080,
-        "description": "Backend API"
-      },
       "relational_db": {
         "internal": 5432,
         "description": "PostgreSQL database",
@@ -17,6 +9,7 @@
       },
       "index": {
         "internal": 19071,
+        "additional_ports": [8081],
         "description": "Vespa search engine",
         "isolate_data": true
       },
@@ -26,6 +19,7 @@
       },
       "minio": {
         "internal": 9000,
+        "additional_ports": [9001],
         "description": "S3-compatible storage",
         "isolate_data": true
       }

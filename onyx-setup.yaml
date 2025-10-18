@@ -1,0 +1,50 @@
+docker_compose:
+  compose_dir: deployment/docker_compose
+  services:
+    relational_db:
+      internal: 5432
+      description: PostgreSQL database
+      isolate_data: true
+    index:
+      internal: 19071
+      additional_ports: [8081]
+      description: Vespa search engine
+      isolate_data: true
+    cache:
+      internal: 6379
+      description: Redis cache
+    minio:
+      internal: 9000
+      additional_ports: [9001]
+      description: S3-compatible storage
+      isolate_data: true
+
+setup_steps:
+  - name: Python virtual environment
+    command: python3 -m venv .venv
+
+  - name: Backend dependencies
+    command: .venv/bin/pip install -r backend/requirements/default.txt
+
+  - name: Backend dev dependencies
+    command: .venv/bin/pip install -r backend/requirements/dev.txt
+
+  - name: Onyx package (editable)
+    command: .venv/bin/pip install -e backend
+
+  - name: Model server dependencies
+    command: .venv/bin/pip install -r backend/requirements/model_server.txt
+
+  - name: Pre-commit
+    command: .venv/bin/pip install pre-commit
+
+  - name: Pre-commit hooks
+    command: .venv/bin/pre-commit install
+    cwd: backend
+
+  - name: Playwright browsers
+    command: .venv/bin/playwright install
+
+  - name: Frontend dependencies
+    command: npm install
+    cwd: web
