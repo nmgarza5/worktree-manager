@@ -5,27 +5,31 @@
 worktree() {
     # Check if this is a new command
     if [[ "$2" == "new" && -n "$3" ]]; then
-        # Run the new command
-        "$HOME/.local/bin/worktree" "$@"
+        # Collect all arguments except --shell-mode
+        local args=()
+        for arg in "$@"; do
+            if [[ "$arg" != "--shell-mode" ]]; then
+                args+=("$arg")
+            fi
+        done
+
+        # Run the actual command with --shell-mode flag and eval the output
+        local output
+        output=$("$HOME/.local/bin/worktree" "${args[@]}" --shell-mode 2>&1)
         local exit_code=$?
 
-        # If successful, cd into the new worktree
         if [[ $exit_code -eq 0 ]]; then
-            # Extract the worktree path - strip ANSI color codes first
-            local worktree_path
-            worktree_path=$("$HOME/.local/bin/worktree" "$1" list 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | grep -A 2 "✓ $3" | grep "Path:" | awk '{print $2}')
-
-            if [[ -n "$worktree_path" && -d "$worktree_path" ]]; then
-                cd "$worktree_path"
-                echo ""
-                echo "📂 Switched to $(pwd)"
-
-                # Activate venv if it exists
-                if [[ -f ".venv/bin/activate" ]]; then
-                    source .venv/bin/activate
-                    echo "🐍 Virtual environment activated"
-                fi
+            # Execute the cd command(s) in the current shell
+            eval "$output"
+            echo ""
+            echo "📂 Switched to $(pwd)"
+            if [[ -n "$VIRTUAL_ENV" ]]; then
+                echo "🐍 Virtual environment activated"
             fi
+        else
+            # If there was an error, just display it
+            echo "$output"
+            return $exit_code
         fi
 
         return $exit_code
@@ -39,6 +43,11 @@ worktree() {
         if [[ $exit_code -eq 0 ]]; then
             # Execute the cd command(s) in the current shell
             eval "$output"
+            echo ""
+            echo "📂 Switched to $(pwd)"
+            if [[ -n "$VIRTUAL_ENV" ]]; then
+                echo "🐍 Virtual environment activated"
+            fi
         else
             # If there was an error, just display it
             echo "$output"

@@ -872,7 +872,7 @@ class WorktreeManager:
 
         return worktrees
 
-    def create_worktree(self, name: str, base_branch: str = "origin/main", skip_setup: bool = False, verbose: bool = False):
+    def create_worktree(self, name: str, base_branch: str = "origin/main", skip_setup: bool = False, verbose: bool = False, shell_mode: bool = False):
         """Create a new worktree with optional environment setup"""
         worktree_path = self._get_worktree_path(name)
 
@@ -935,13 +935,20 @@ class WorktreeManager:
                         self._print_warning(f"Setup step failed: {step.get('name', step.get('type'))} - {str(e)}")
                         print(f"{Colors.YELLOW}Continuing with remaining steps...{Colors.END}")
 
-        print(f"\n{Colors.GREEN}{Colors.BOLD}✓ Worktree '{name}' is ready!{Colors.END}")
+        # In shell mode, output just the cd commands for the shell wrapper to eval
+        if shell_mode:
+            venv_activate = worktree_path / ".venv" / "bin" / "activate"
+            print(f"cd {worktree_path}")
+            if venv_activate.exists():
+                print(f"source .venv/bin/activate")
+        else:
+            print(f"\n{Colors.GREEN}{Colors.BOLD}✓ Worktree '{name}' is ready!{Colors.END}")
 
-        # Show port information if Docker Compose was configured
-        if ports_map:
-            print(f"\n{Colors.BOLD}Service Ports:{Colors.END}")
-            for service, port in sorted(ports_map.items()):
-                print(f"  {service}: {port}")
+            # Show port information if Docker Compose was configured
+            if ports_map:
+                print(f"\n{Colors.BOLD}Service Ports:{Colors.END}")
+                for service, port in sorted(ports_map.items()):
+                    print(f"  {service}: {port}")
 
     def remove_worktree(self, name: str, force: bool = False):
         """Remove a worktree and clean up its branch"""
@@ -1887,6 +1894,7 @@ def main():
         new_parser.add_argument("--base", default="origin/main", help="Base branch (default: origin/main)")
         new_parser.add_argument("--skip-setup", action="store_true", help="Skip setup steps")
         new_parser.add_argument("--verbose", "-v", action="store_true", help="Show detailed output from setup steps")
+        new_parser.add_argument("--shell-mode", action="store_true", help=argparse.SUPPRESS)  # Hidden flag for shell wrapper
 
         # Remove command
         rm_parser = wt_subparsers.add_parser("rm", help="Remove a worktree")
@@ -1945,7 +1953,7 @@ def main():
         manager = WorktreeManager(repo_path, repo_alias)
 
         if wt_args.wt_command == "new":
-            manager.create_worktree(wt_args.name, wt_args.base, wt_args.skip_setup, wt_args.verbose)
+            manager.create_worktree(wt_args.name, wt_args.base, wt_args.skip_setup, wt_args.verbose, getattr(wt_args, 'shell_mode', False))
         elif wt_args.wt_command == "rm":
             manager.remove_worktree(wt_args.name, wt_args.force)
         elif wt_args.wt_command == "select":
