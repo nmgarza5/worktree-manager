@@ -6,6 +6,17 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEST_VENV="$SCRIPT_DIR/.test-venv"
 
+# Cleanup function
+cleanup() {
+    if [ -d "$TEST_VENV" ]; then
+        echo "Cleaning up test virtual environment..."
+        rm -rf "$TEST_VENV"
+    fi
+}
+
+# Set up trap for cleanup on exit
+trap cleanup EXIT
+
 # Create test virtual environment if it doesn't exist
 if [ ! -d "$TEST_VENV" ]; then
     echo "Creating test virtual environment..."
