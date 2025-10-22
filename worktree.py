@@ -412,23 +412,49 @@ class DatabaseManager:
         spinner = Spinner(f"Preparing database in '{worktree_name}' for restore")
         spinner.start()
         try:
-            # Terminate existing connections
+            # Terminate all existing connections to postgres database
+            # Connect to template1 to avoid "cannot drop the currently open database" error
             subprocess.run(
-                f"docker exec {container_name} psql -U postgres -c \"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'postgres' AND pid <> pg_backend_pid();\"",
+                f"docker exec {container_name} psql -U postgres template1 -c \"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'postgres';\"",
                 shell=True,
                 capture_output=True,
                 check=False
             )
 
-            # Drop and recreate database
-            subprocess.run(
-                f"docker exec {container_name} psql -U postgres -c 'DROP DATABASE IF EXISTS postgres;'",
+            # Give connections a moment to terminate
+            time.sleep(0.5)
+
+            # Drop database (connecting to template1, not postgres)
+            result = subprocess.run(
+                f"docker exec {container_name} psql -U postgres template1 -c 'DROP DATABASE IF EXISTS postgres;'",
                 shell=True,
-                check=True,
-                capture_output=True
+                check=False,
+                capture_output=True,
+                text=True
             )
+
+            # If drop still fails due to active connections, retry with force
+            if result.returncode != 0 and "being accessed by other users" in result.stderr:
+                # Force terminate again and retry
+                subprocess.run(
+                    f"docker exec {container_name} psql -U postgres template1 -c \"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'postgres';\"",
+                    shell=True,
+                    capture_output=True,
+                    check=False
+                )
+                time.sleep(1)
+                subprocess.run(
+                    f"docker exec {container_name} psql -U postgres template1 -c 'DROP DATABASE postgres;'",
+                    shell=True,
+                    check=True,
+                    capture_output=True
+                )
+            elif result.returncode != 0:
+                raise subprocess.CalledProcessError(result.returncode, result.args, result.stdout, result.stderr)
+
+            # Create fresh database
             subprocess.run(
-                f"docker exec {container_name} psql -U postgres -c 'CREATE DATABASE postgres;'",
+                f"docker exec {container_name} psql -U postgres template1 -c 'CREATE DATABASE postgres;'",
                 shell=True,
                 check=True,
                 capture_output=True
