@@ -20,7 +20,9 @@ Just create a new worktree and start coding!
 - **Multiple repos**: Configure aliases for all your repositories
 - **Organized**: Worktrees stored in `<repo-name>-worktrees` directories
 - **Optional setup**: Automated environment setup per repository
-- **Simple**: Just configure once, then use 4 commands
+- **Complete isolation**: Run multiple instances with separate databases, ports, and containers
+- **Database management**: Dump, restore, and copy databases between instances
+- **Simple**: Just configure once, then use powerful commands
 
 ## Installation
 
@@ -77,6 +79,49 @@ worktree myapp list
 worktree myapp rm hotfix-123
 ```
 
+## Running Multiple Isolated Instances
+
+The worktree manager supports complete isolation for running multiple Onyx instances simultaneously. Each instance has:
+- Separate Docker containers with unique ports
+- Isolated PostgreSQL databases
+- Independent Redis, Vespa, and MinIO instances
+- Separate backend, frontend, and worker processes
+
+### Quick Example
+
+```bash
+# Create instance with copy of main database
+worktree onyx new feature-auth --copy-db-from-main
+
+# Create another instance
+worktree onyx new feature-search --copy-db-from-main
+
+# View all instances
+worktree onyx instances
+
+# Each runs on different ports - no conflicts!
+# feature-auth: PostgreSQL on 5432, backend on 8080, frontend on 3000
+# feature-search: PostgreSQL on 5442, backend on 8090, frontend on 3010
+```
+
+### Database Management
+
+```bash
+# Save database state
+worktree onyx db dump feature-auth
+
+# Restore to another worktree
+worktree onyx db restore feature-search feature-auth-20250115.sql
+
+# List all saved dumps
+worktree onyx db list-dumps
+
+# Connect to database
+worktree onyx db shell feature-auth
+```
+
+**See [ISOLATION.md](ISOLATION.md) for complete isolation details and [DB_MANAGEMENT.md](DB_MANAGEMENT.md) for database workflows.**
+
 ## Commands
 
 ### Repository Management
@@ -106,9 +151,11 @@ All worktree commands follow this pattern: `worktree <repo-alias> <command>`
 #### Create Worktree
 
 ```bash
-worktree <repo> new <name>                    # From origin/main
-worktree <repo> new <name> --base develop     # From different branch
-worktree <repo> new <name> --skip-setup       # Skip automated setup
+worktree <repo> new <name>                           # From origin/main
+worktree <repo> new <name> --base develop            # From different branch
+worktree <repo> new <name> --skip-setup              # Skip automated setup
+worktree <repo> new <name> --copy-db-from-main       # Copy database from main
+worktree <repo> new <name> --restore-db <dump-file>  # Restore from dump
 ```
 
 **Examples:**
@@ -116,6 +163,12 @@ worktree <repo> new <name> --skip-setup       # Skip automated setup
 worktree onyx new feature-auth
 worktree onyx new hotfix-123 --base origin/production
 worktree myapp new quick-test --skip-setup
+
+# Create with database copy
+worktree onyx new feature-auth --copy-db-from-main
+
+# Create with specific database state
+worktree onyx new debug-issue --restore-db main-20250115.sql
 ```
 
 #### List Worktrees
@@ -218,6 +271,93 @@ worktree <repo> services logs --tail 100           # Last 100 lines
 ```
 
 **See [DOCKER.md](DOCKER.md) for complete Docker Compose documentation.**
+
+### Database Management
+
+Manage PostgreSQL databases across worktree instances.
+
+#### Create Database Dump
+
+```bash
+worktree <repo> db dump                        # Dump main installation
+worktree <repo> db dump <worktree-name>        # Dump specific worktree
+worktree <repo> db dump <worktree-name> -o file.sql  # Custom output
+```
+
+**Examples:**
+```bash
+worktree onyx db dump                          # Dump main ~/onyx database
+worktree onyx db dump feature-auth             # Dump feature-auth worktree
+worktree onyx db dump feature-auth -o backup.sql
+```
+
+#### Restore Database
+
+```bash
+worktree <repo> db restore <worktree> <dump-file>
+```
+
+**Examples:**
+```bash
+worktree onyx db restore feature-auth main-20250115.sql
+worktree onyx db restore debug-issue ~/backups/production.sql
+```
+
+#### List Database Dumps
+
+```bash
+worktree <repo> db list-dumps
+```
+
+Shows all saved dumps with size and modification time.
+
+#### Connect to Database
+
+```bash
+worktree <repo> db shell                       # Connect to main installation
+worktree <repo> db shell <worktree-name>       # Connect to worktree
+```
+
+**Examples:**
+```bash
+worktree onyx db shell                         # psql to main database
+worktree onyx db shell feature-auth            # psql to feature-auth database
+```
+
+**See [DB_MANAGEMENT.md](DB_MANAGEMENT.md) for complete database workflows.**
+
+### View All Instances
+
+```bash
+worktree <repo> instances
+```
+
+Shows all worktree instances with:
+- Port offsets
+- Running services
+- Service ports
+- Creation dates
+
+**Example output:**
+```
+Running worktree instances for 'onyx':
+
+  ● feature-auth
+    Port offset: 0
+    Created: 2025-01-15
+    Running services:
+      - relational_db: http://localhost:5432
+      - cache: http://localhost:6379
+    All configured ports:
+      ✓ relational_db: 5432
+      ✓ cache: 6379
+      ✓ minio: 9000
+
+  ○ feature-search
+    Port offset: 10
+    Created: 2025-01-15
+    (No services running)
+```
 
 ## How It Works
 

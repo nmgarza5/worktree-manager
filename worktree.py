@@ -285,6 +285,177 @@ class WorktreeMetadata:
         return self.metadata
 
 
+class DatabaseManager:
+    """Manages database dump and restore operations"""
+
+    def __init__(self, repo_alias: str):
+        self.repo_alias = repo_alias
+        self.dumps_dir = Path.home() / ".worktree-dumps" / repo_alias
+        self.dumps_dir.mkdir(parents=True, exist_ok=True)
+
+    def _get_container_name(self, worktree_name: Optional[str] = None) -> Optional[str]:
+        """Get the postgres container name for a worktree or main installation"""
+        if worktree_name is None:
+            # Look for main onyx installation container
+            result = subprocess.run(
+                "docker ps --filter 'name=relational_db' --format '{{.Names}}'",
+                shell=True,
+                capture_output=True,
+                text=True
+            )
+            containers = result.stdout.strip().split('\n')
+            # Filter out worktree containers (they have a dash in the name)
+            main_containers = [c for c in containers if c and '-' not in c.replace('relational_db', '')]
+            if main_containers:
+                return main_containers[0]
+            return None
+        else:
+            # Worktree container name
+            return f"relational_db-{worktree_name}"
+
+    def _wait_for_postgres(self, container_name: str, max_attempts: int = 30) -> bool:
+        """Wait for postgres to be ready"""
+        for i in range(max_attempts):
+            result = subprocess.run(
+                f"docker exec {container_name} pg_isready -U postgres",
+                shell=True,
+                capture_output=True
+            )
+            if result.returncode == 0:
+                return True
+            time.sleep(1)
+        return False
+
+    def dump_database(self, worktree_name: Optional[str] = None, output_file: Optional[Path] = None) -> Path:
+        """Create a database dump from a worktree or main installation
+
+        Returns the path to the dump file
+        """
+        container_name = self._get_container_name(worktree_name)
+
+        if not container_name:
+            if worktree_name is None:
+                raise Exception("No main postgres container found. Is your main Onyx instance running?")
+            else:
+                raise Exception(f"Container 'relational_db-{worktree_name}' not found. Is it running?")
+
+        # Verify container is running
+        result = subprocess.run(
+            f"docker ps --filter 'name={container_name}' --format '{{{{.Names}}}}'",
+            shell=True,
+            capture_output=True,
+            text=True
+        )
+        if container_name not in result.stdout:
+            raise Exception(f"Container '{container_name}' is not running")
+
+        # Wait for postgres to be ready
+        if not self._wait_for_postgres(container_name):
+            raise Exception(f"Postgres in container '{container_name}' did not become ready")
+
+        # Determine output file
+        if output_file is None:
+            timestamp = subprocess.run(['date', '+%Y%m%d-%H%M%S'], capture_output=True, text=True).stdout.strip()
+            dump_name = f"{worktree_name or 'main'}-{timestamp}.sql"
+            output_file = self.dumps_dir / dump_name
+
+        # Create dump
+        spinner = Spinner(f"Creating database dump from '{worktree_name or 'main'}'")
+        spinner.start()
+        try:
+            cmd = f"docker exec {container_name} pg_dump -U postgres postgres > {output_file}"
+            subprocess.run(cmd, shell=True, check=True)
+            spinner.stop(f"{Colors.GREEN}✓{Colors.END} Dump created: {output_file}")
+        except subprocess.CalledProcessError as e:
+            spinner.stop()
+            raise Exception(f"Failed to create dump: {e}")
+
+        return output_file
+
+    def restore_database(self, worktree_name: str, dump_file: Path):
+        """Restore a database dump to a worktree's postgres"""
+        if not dump_file.exists():
+            raise Exception(f"Dump file not found: {dump_file}")
+
+        container_name = self._get_container_name(worktree_name)
+        if not container_name:
+            raise Exception(f"Container 'relational_db-{worktree_name}' not found")
+
+        # Verify container is running
+        result = subprocess.run(
+            f"docker ps --filter 'name={container_name}' --format '{{{{.Names}}}}'",
+            shell=True,
+            capture_output=True,
+            text=True
+        )
+        if container_name not in result.stdout:
+            raise Exception(f"Container '{container_name}' is not running. Start services first.")
+
+        # Wait for postgres to be ready
+        if not self._wait_for_postgres(container_name):
+            raise Exception(f"Postgres in container '{container_name}' did not become ready")
+
+        # Drop and recreate database to ensure clean state
+        spinner = Spinner(f"Preparing database in '{worktree_name}' for restore")
+        spinner.start()
+        try:
+            # Terminate existing connections
+            subprocess.run(
+                f"docker exec {container_name} psql -U postgres -c \"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'postgres' AND pid <> pg_backend_pid();\"",
+                shell=True,
+                capture_output=True,
+                check=False
+            )
+
+            # Drop and recreate database
+            subprocess.run(
+                f"docker exec {container_name} psql -U postgres -c 'DROP DATABASE IF EXISTS postgres;'",
+                shell=True,
+                check=True,
+                capture_output=True
+            )
+            subprocess.run(
+                f"docker exec {container_name} psql -U postgres -c 'CREATE DATABASE postgres;'",
+                shell=True,
+                check=True,
+                capture_output=True
+            )
+            spinner.stop(f"{Colors.GREEN}✓{Colors.END} Database prepared for restore")
+        except subprocess.CalledProcessError as e:
+            spinner.stop()
+            raise Exception(f"Failed to prepare database: {e}")
+
+        # Restore dump
+        spinner = Spinner(f"Restoring database dump to '{worktree_name}'")
+        spinner.start()
+        try:
+            cmd = f"docker exec -i {container_name} psql -U postgres postgres < {dump_file}"
+            subprocess.run(cmd, shell=True, check=True, capture_output=True)
+            spinner.stop(f"{Colors.GREEN}✓{Colors.END} Database restored successfully")
+        except subprocess.CalledProcessError as e:
+            spinner.stop()
+            raise Exception(f"Failed to restore dump: {e}")
+
+    def list_dumps(self) -> List[Path]:
+        """List all available dumps for this repository"""
+        if not self.dumps_dir.exists():
+            return []
+        return sorted(self.dumps_dir.glob("*.sql"), key=lambda p: p.stat().st_mtime, reverse=True)
+
+    def get_dump_info(self, dump_file: Path) -> Dict[str, str]:
+        """Get information about a dump file"""
+        stat = dump_file.stat()
+        size_mb = stat.st_size / (1024 * 1024)
+        mtime = subprocess.run(['date', '-r', str(int(stat.st_mtime)), '+%Y-%m-%d %H:%M:%S'],
+                             capture_output=True, text=True).stdout.strip()
+        return {
+            'name': dump_file.name,
+            'size': f"{size_mb:.1f} MB",
+            'modified': mtime,
+            'path': str(dump_file)
+        }
+
+
 class SetupExecutor:
     """Executes setup steps based on configuration"""
 
@@ -704,6 +875,9 @@ class WorktreeManager:
         # Initialize metadata tracker
         self.metadata = WorktreeMetadata()
 
+        # Initialize database manager
+        self.db_manager = DatabaseManager(self.repo_alias)
+
     def _load_setup_config(self) -> Optional[Dict]:
         """Load setup configuration if it exists (supports both YAML and JSON)"""
         # Look for repo-specific setup files first
@@ -872,8 +1046,8 @@ class WorktreeManager:
 
         return worktrees
 
-    def create_worktree(self, name: str, base_branch: str = "origin/main", skip_setup: bool = False, verbose: bool = False, shell_mode: bool = False):
-        """Create a new worktree with optional environment setup"""
+    def create_worktree(self, name: str, base_branch: str = "origin/main", skip_setup: bool = False, verbose: bool = False, shell_mode: bool = False, restore_db: Optional[str] = None, copy_db_from_main: bool = False):
+        """Create a new worktree with optional environment setup and database restore"""
         worktree_path = self._get_worktree_path(name)
 
         if worktree_path.exists():
@@ -934,6 +1108,55 @@ class WorktreeManager:
                     except Exception as e:
                         self._print_warning(f"Setup step failed: {step.get('name', step.get('type'))} - {str(e)}")
                         print(f"{Colors.YELLOW}Continuing with remaining steps...{Colors.END}")
+
+        # Handle database restore if requested
+        if (restore_db or copy_db_from_main) and not skip_setup:
+            if not docker_config or 'relational_db' not in docker_config.get('services', {}):
+                print(f"\n{Colors.YELLOW}⚠ Warning: Database restore requested but no PostgreSQL service configured{Colors.END}")
+            else:
+                # Start just the postgres service
+                print(f"\n{Colors.BOLD}Database restore requested...{Colors.END}")
+                base_file, override_file, compose_dir, _ = self._get_docker_compose_files(name)
+                if base_file and override_file:
+                    spinner = Spinner("Starting PostgreSQL service")
+                    spinner.start()
+                    try:
+                        cmd = [
+                            "docker", "compose",
+                            "-f", str(base_file),
+                            "-f", str(override_file),
+                            "up", "-d", "relational_db"
+                        ]
+                        self._run_command(cmd, cwd=Path(compose_dir))
+                        spinner.stop(f"{Colors.GREEN}✓{Colors.END} PostgreSQL started")
+
+                        # Determine dump source
+                        if copy_db_from_main:
+                            # Create dump from main installation
+                            try:
+                                dump_file = self.db_manager.dump_database(worktree_name=None)
+                                self.db_manager.restore_database(name, dump_file)
+                            except Exception as e:
+                                print(f"\n{Colors.RED}Error during database copy: {e}{Colors.END}")
+                                print(f"{Colors.YELLOW}You can manually restore later with:{Colors.END}")
+                                print(f"  worktree {self.repo_alias} db restore {name} <dump-file>")
+                        elif restore_db:
+                            # Restore from specified dump file
+                            dump_path = Path(restore_db).expanduser()
+                            if not dump_path.is_absolute():
+                                # Try to find it in the dumps directory
+                                dumps_dir_file = self.db_manager.dumps_dir / restore_db
+                                if dumps_dir_file.exists():
+                                    dump_path = dumps_dir_file
+                            try:
+                                self.db_manager.restore_database(name, dump_path)
+                            except Exception as e:
+                                print(f"\n{Colors.RED}Error during database restore: {e}{Colors.END}")
+                                print(f"{Colors.YELLOW}You can manually restore later with:{Colors.END}")
+                                print(f"  worktree {self.repo_alias} db restore {name} {dump_path}")
+                    except subprocess.CalledProcessError:
+                        spinner.stop()
+                        print(f"\n{Colors.YELLOW}⚠ Could not start PostgreSQL service{Colors.END}")
 
         # In shell mode, output just the cd commands for the shell wrapper to eval
         if shell_mode:
@@ -1894,6 +2117,8 @@ def main():
         new_parser.add_argument("--base", default="origin/main", help="Base branch (default: origin/main)")
         new_parser.add_argument("--skip-setup", action="store_true", help="Skip setup steps")
         new_parser.add_argument("--verbose", "-v", action="store_true", help="Show detailed output from setup steps")
+        new_parser.add_argument("--restore-db", metavar="DUMP_FILE", help="Restore database from dump file during creation")
+        new_parser.add_argument("--copy-db-from-main", action="store_true", help="Copy database from main installation during creation")
         new_parser.add_argument("--shell-mode", action="store_true", help=argparse.SUPPRESS)  # Hidden flag for shell wrapper
 
         # Remove command
@@ -1944,6 +2169,30 @@ def main():
         logs_parser.add_argument("-f", "--follow", action="store_true", help="Follow log output")
         logs_parser.add_argument("--tail", help="Number of lines to show from end of logs")
 
+        # Database commands
+        db_parser = wt_subparsers.add_parser("db", help="Database management commands")
+        db_subparsers = db_parser.add_subparsers(dest="db_command")
+
+        # Dump database
+        dump_parser = db_subparsers.add_parser("dump", help="Create database dump")
+        dump_parser.add_argument("worktree", nargs="?", help="Worktree name (omit for main installation)")
+        dump_parser.add_argument("-o", "--output", help="Output file path")
+
+        # Restore database
+        restore_parser = db_subparsers.add_parser("restore", help="Restore database from dump")
+        restore_parser.add_argument("worktree", help="Worktree name to restore to")
+        restore_parser.add_argument("dump_file", help="Dump file to restore from")
+
+        # List dumps
+        db_subparsers.add_parser("list-dumps", help="List available database dumps")
+
+        # Database shell
+        shell_parser = db_subparsers.add_parser("shell", help="Connect to worktree's PostgreSQL")
+        shell_parser.add_argument("worktree", nargs="?", help="Worktree name (omit for main installation)")
+
+        # Instances command
+        wt_subparsers.add_parser("instances", help="Show all running worktree instances with ports")
+
         wt_args = wt_parser.parse_args(sys.argv[2:])
 
         if not wt_args.wt_command:
@@ -1953,7 +2202,15 @@ def main():
         manager = WorktreeManager(repo_path, repo_alias)
 
         if wt_args.wt_command == "new":
-            manager.create_worktree(wt_args.name, wt_args.base, wt_args.skip_setup, wt_args.verbose, getattr(wt_args, 'shell_mode', False))
+            manager.create_worktree(
+                wt_args.name,
+                wt_args.base,
+                wt_args.skip_setup,
+                wt_args.verbose,
+                getattr(wt_args, 'shell_mode', False),
+                restore_db=wt_args.restore_db,
+                copy_db_from_main=wt_args.copy_db_from_main
+            )
         elif wt_args.wt_command == "rm":
             manager.remove_worktree(wt_args.name, wt_args.force)
         elif wt_args.wt_command == "select":
@@ -1984,6 +2241,111 @@ def main():
                 manager.services_logs(wt_args.service, wt_args.follow, wt_args.tail)
             else:
                 services_parser.print_help()
+        elif wt_args.wt_command == "db":
+            if wt_args.db_command == "dump":
+                try:
+                    output_file = Path(wt_args.output).expanduser() if wt_args.output else None
+                    dump_file = manager.db_manager.dump_database(wt_args.worktree, output_file)
+                    print(f"\n{Colors.GREEN}✓ Dump created successfully{Colors.END}")
+                    info = manager.db_manager.get_dump_info(dump_file)
+                    print(f"  Size: {info['size']}")
+                    print(f"  Path: {info['path']}")
+                except Exception as e:
+                    print(f"{Colors.RED}Error: {e}{Colors.END}")
+                    sys.exit(1)
+            elif wt_args.db_command == "restore":
+                try:
+                    dump_path = Path(wt_args.dump_file).expanduser()
+                    if not dump_path.is_absolute():
+                        # Try to find it in dumps directory
+                        dumps_dir_file = manager.db_manager.dumps_dir / wt_args.dump_file
+                        if dumps_dir_file.exists():
+                            dump_path = dumps_dir_file
+                    manager.db_manager.restore_database(wt_args.worktree, dump_path)
+                    print(f"\n{Colors.GREEN}✓ Database restored successfully{Colors.END}")
+                except Exception as e:
+                    print(f"{Colors.RED}Error: {e}{Colors.END}")
+                    sys.exit(1)
+            elif wt_args.db_command == "list-dumps":
+                dumps = manager.db_manager.list_dumps()
+                if not dumps:
+                    print(f"{Colors.YELLOW}No database dumps found{Colors.END}")
+                    print(f"Dumps directory: {manager.db_manager.dumps_dir}")
+                else:
+                    print(f"{Colors.BOLD}Available database dumps:{Colors.END}")
+                    print(f"Location: {manager.db_manager.dumps_dir}\n")
+                    for dump_file in dumps:
+                        info = manager.db_manager.get_dump_info(dump_file)
+                        print(f"  {Colors.BOLD}{info['name']}{Colors.END}")
+                        print(f"    Size: {info['size']}")
+                        print(f"    Modified: {info['modified']}")
+                        print()
+            elif wt_args.db_command == "shell":
+                container_name = manager.db_manager._get_container_name(wt_args.worktree)
+                if not container_name:
+                    if wt_args.worktree:
+                        print(f"{Colors.RED}Error: Container for worktree '{wt_args.worktree}' not found{Colors.END}")
+                    else:
+                        print(f"{Colors.RED}Error: No main postgres container found{Colors.END}")
+                    sys.exit(1)
+
+                print(f"{Colors.GREEN}Connecting to PostgreSQL in '{wt_args.worktree or 'main'}'...{Colors.END}")
+                try:
+                    subprocess.run(
+                        f"docker exec -it {container_name} psql -U postgres postgres",
+                        shell=True
+                    )
+                except KeyboardInterrupt:
+                    print(f"\n{Colors.YELLOW}Connection closed{Colors.END}")
+            else:
+                db_parser.print_help()
+        elif wt_args.wt_command == "instances":
+            # Show all worktree instances with their ports
+            all_worktrees = manager.metadata.list_all_worktrees(repo_alias)
+
+            if not all_worktrees or repo_alias not in all_worktrees or not all_worktrees[repo_alias]:
+                print(f"{Colors.YELLOW}No worktree instances found for '{repo_alias}'{Colors.END}")
+            else:
+                print(f"{Colors.BOLD}Running worktree instances for '{repo_alias}':{Colors.END}\n")
+
+                for worktree_name, worktree_data in sorted(all_worktrees[repo_alias].items()):
+                    port_offset = worktree_data.get('port_offset', 0)
+                    ports = worktree_data.get('ports', {})
+                    created = worktree_data.get('created', 'Unknown')
+
+                    # Check if containers are actually running
+                    containers_running = []
+                    for service_name in ports.keys():
+                        container_name = f"{service_name}-{worktree_name}"
+                        result = subprocess.run(
+                            f"docker ps --filter 'name={container_name}' --format '{{{{.Names}}}}'",
+                            shell=True,
+                            capture_output=True,
+                            text=True
+                        )
+                        if container_name in result.stdout:
+                            containers_running.append(service_name)
+
+                    status_icon = f"{Colors.GREEN}●{Colors.END}" if containers_running else f"{Colors.DIM}○{Colors.END}"
+                    print(f"  {status_icon} {Colors.BOLD}{worktree_name}{Colors.END}")
+                    print(f"    Port offset: {port_offset}")
+                    print(f"    Created: {created}")
+
+                    if containers_running:
+                        print(f"    Running services:")
+                        for service_name in containers_running:
+                            port = ports.get(service_name, 'N/A')
+                            print(f"      - {service_name}: http://localhost:{port}")
+                    else:
+                        print(f"    {Colors.DIM}(No services running){Colors.END}")
+
+                    if ports:
+                        print(f"    All configured ports:")
+                        for service_name, port in sorted(ports.items()):
+                            running_mark = "✓" if service_name in containers_running else " "
+                            print(f"      {running_mark} {service_name}: {port}")
+
+                    print()
         return
 
     # Regular argparse for repo management
