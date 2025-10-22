@@ -2225,6 +2225,10 @@ def main():
         # List dumps
         db_subparsers.add_parser("list-dumps", help="List available database dumps")
 
+        # Copy from main (dump + restore in one command)
+        copy_parser = db_subparsers.add_parser("copy-from-main", help="Dump main database and restore to worktree (all in one)")
+        copy_parser.add_argument("worktree", help="Worktree name to restore to")
+
         # Database shell
         shell_parser = db_subparsers.add_parser("shell", help="Connect to worktree's PostgreSQL")
         shell_parser.add_argument("worktree", nargs="?", help="Worktree name (omit for main installation)")
@@ -2319,6 +2323,23 @@ def main():
                         print(f"    Size: {info['size']}")
                         print(f"    Modified: {info['modified']}")
                         print()
+            elif wt_args.db_command == "copy-from-main":
+                try:
+                    # Step 1: Dump from main
+                    print(f"{Colors.BOLD}Step 1/2: Creating dump from main installation{Colors.END}")
+                    dump_file = manager.db_manager.dump_database(worktree_name=None)
+                    info = manager.db_manager.get_dump_info(dump_file)
+                    print(f"  Size: {info['size']}")
+
+                    # Step 2: Restore to worktree
+                    print(f"\n{Colors.BOLD}Step 2/2: Restoring to '{wt_args.worktree}'{Colors.END}")
+                    manager.db_manager.restore_database(wt_args.worktree, dump_file)
+
+                    print(f"\n{Colors.GREEN}✓ Database successfully copied from main to '{wt_args.worktree}'{Colors.END}")
+                    print(f"  Dump saved: {dump_file}")
+                except Exception as e:
+                    print(f"\n{Colors.RED}Error: {e}{Colors.END}")
+                    sys.exit(1)
             elif wt_args.db_command == "shell":
                 container_name = manager.db_manager._get_container_name(wt_args.worktree)
                 if not container_name:
