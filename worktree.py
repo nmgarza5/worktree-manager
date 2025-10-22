@@ -297,15 +297,28 @@ class DatabaseManager:
         """Get the postgres container name for a worktree or main installation"""
         if worktree_name is None:
             # Look for main onyx installation container
+            # Try common postgres container names for Onyx
             result = subprocess.run(
-                "docker ps --filter 'name=relational_db' --format '{{.Names}}'",
+                "docker ps --format '{{.Names}}' | grep -i postgres",
                 shell=True,
                 capture_output=True,
                 text=True
             )
             containers = result.stdout.strip().split('\n')
-            # Filter out worktree containers (they have a dash in the name)
-            main_containers = [c for c in containers if c and '-' not in c.replace('relational_db', '')]
+
+            # Filter out worktree containers (they end with -{worktree_name})
+            # Main containers are typically: onyx_postgres, postgres, relational_db, onyx-postgres-1, etc.
+            # Worktree containers are: relational_db-{worktree_name}
+            main_containers = []
+            for c in containers:
+                if not c:
+                    continue
+                # Skip if it matches the worktree pattern: relational_db-{name}
+                if c.startswith('relational_db-'):
+                    continue
+                # This is likely a main installation postgres
+                main_containers.append(c)
+
             if main_containers:
                 return main_containers[0]
             return None
